@@ -17,101 +17,6 @@ from telegram.ext import (
 
 logging.basicConfig(level=logging.INFO)
 
-# ===== ПРОКСИ =====
-# Формат: host:port:user:pass
-_PROXY_LIST = [
-    # proxies.txt — аккаунт spv4yuud2r
-    "dc.decodo.com:10001:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10002:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10003:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10004:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10005:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10006:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10007:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10008:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10009:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    "dc.decodo.com:10010:spv4yuud2r:5vdwAL4mymi+f83XtV",
-    # proxies2.txt — аккаунт sp3g12m118
-    "dc.decodo.com:10001:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10002:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10003:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10004:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10005:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10006:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10007:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10008:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10009:sp3g12m118:~A1rRln78IYeemro5q",
-    "dc.decodo.com:10010:sp3g12m118:~A1rRln78IYeemro5q",
-    # proxies3.txt — аккаунт spxl7cd51h
-    "dc.decodo.com:10001:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10002:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10003:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10004:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10005:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10006:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10007:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10008:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10009:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    "dc.decodo.com:10010:spxl7cd51h:=j70U8vw9ySLeizfkW",
-    # proxies4.txt — аккаунт sp5xvqyhjn
-    "dc.decodo.com:10001:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10002:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10003:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10004:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10005:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10006:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10007:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10008:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10009:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    "dc.decodo.com:10010:sp5xvqyhjn:d0u5Gfkqr=qK93HtUu",
-    # data.txt — аккаунт sphz054mdr
-    "dc.decodo.com:10001:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10002:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10003:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10004:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10005:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10006:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10007:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10008:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10009:sphz054mdr:a0efg1NruE=d9NsM5k",
-    "dc.decodo.com:10010:sphz054mdr:a0efg1NruE=d9NsM5k",
-    # оригинальный — аккаунт sp13uinlcj
-    "dc.decodo.com:10001:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10002:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10003:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10004:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10005:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10006:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10007:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10008:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10009:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-    "dc.decodo.com:10010:sp13uinlcj:3lS0aw8eHMcJr~tm4v",
-]
-_proxy_index = 0
-_proxy_lock = __import__("threading").Lock()
-
-def get_proxy():
-    """Возвращает следующий прокси по кругу (round-robin)."""
-    global _proxy_index
-    with _proxy_lock:
-        entry = _PROXY_LIST[_proxy_index % len(_PROXY_LIST)]
-        _proxy_index += 1
-    host, port, user, passwd = entry.split(":")
-    proxy_url = f"http://{user}:{passwd}@{host}:{port}"
-    return {"http": proxy_url, "https": proxy_url}
-
-def get_proxy_url():
-    """Возвращает строку прокси для Playwright."""
-    global _proxy_index
-    with _proxy_lock:
-        entry = _PROXY_LIST[_proxy_index % len(_PROXY_LIST)]
-        _proxy_index += 1
-    host, port, user, passwd = entry.split(":")
-    return {
-        "server": f"http://{host}:{port}",
-        "username": user,
-        "password": passwd,
-    }
 
 BOT_TOKEN        = os.environ.get("BOT_TOKEN")
 CRYPTO_BOT_TOKEN = os.environ.get("CRYPTO_BOT_TOKEN", "")
@@ -185,8 +90,19 @@ WAITING_ADMIN_ADD_BALANCE = 8
 WAITING_ADMIN_ADD_BALANCE_AMOUNT = 9
 WAITING_ADMIN_CREATE_PROMO = 10
 
-PRICE = 0.20
-DISCOUNTS = {5: 0.05, 10: 0.10, 25: 0.15}
+# Без 2FA — БЕСПЛАТНО
+# С 2FA — $1 за попытку
+PRICE_2FA = 1.00
+DISCOUNTS_2FA = {5: 0.05, 10: 0.10, 15: 0.15, 25: 0.20}
+
+# Подписки на безлимит 2FA: {дней: цена} (0 = навсегда)
+SUBSCRIPTIONS = {
+    1:  3.00,   # 1 день
+    3:  5.00,   # 3 дня
+    7:  10.00,  # 7 дней
+    30: 25.00,  # 30 дней
+    0:  50.00,  # Навсегда
+}
 
 DB_PATH = "bot_data.db"
 
@@ -217,6 +133,13 @@ def db_init():
             user_id INTEGER,
             code TEXT,
             PRIMARY KEY (user_id, code)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            user_id INTEGER PRIMARY KEY,
+            expires_at TEXT,
+            is_forever INTEGER DEFAULT 0
         )
     """)
     conn.commit()
@@ -327,6 +250,62 @@ def db_get_all_promos():
     conn.close()
     return rows
 
+def db_get_subscription(user_id):
+    """Возвращает (is_active, expires_at_str, is_forever)"""
+    import datetime
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT expires_at, is_forever FROM subscriptions WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return False, None, False
+    expires_at_str, is_forever = row
+    if is_forever:
+        return True, "Навсегда", True
+    if expires_at_str:
+        try:
+            exp = datetime.datetime.fromisoformat(expires_at_str)
+            if exp > datetime.datetime.utcnow():
+                return True, expires_at_str, False
+        except Exception:
+            pass
+    return False, expires_at_str, False
+
+
+def db_set_subscription(user_id, days):
+    """Устанавливает подписку. days=0 — навсегда."""
+    import datetime
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if days == 0:
+        c.execute("""
+            INSERT INTO subscriptions (user_id, expires_at, is_forever)
+            VALUES (?, NULL, 1)
+            ON CONFLICT(user_id) DO UPDATE SET expires_at=NULL, is_forever=1
+        """, (user_id,))
+    else:
+        # Если есть активная подписка — продлеваем
+        c.execute("SELECT expires_at, is_forever FROM subscriptions WHERE user_id=?", (user_id,))
+        existing = c.fetchone()
+        now = datetime.datetime.utcnow()
+        if existing and not existing[1] and existing[0]:
+            try:
+                exp = datetime.datetime.fromisoformat(existing[0])
+                if exp > now:
+                    now = exp  # продлеваем от текущего конца
+            except Exception:
+                pass
+        new_exp = (now + datetime.timedelta(days=days)).isoformat()
+        c.execute("""
+            INSERT INTO subscriptions (user_id, expires_at, is_forever)
+            VALUES (?, ?, 0)
+            ON CONFLICT(user_id) DO UPDATE SET expires_at=?, is_forever=0
+        """, (user_id, new_exp, new_exp))
+    conn.commit()
+    conn.close()
+
+
 def db_get_lang(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -349,7 +328,7 @@ TEXTS = {
     "ru": {
         "main_menu_title": "*Roblox Age Verification Bot*",
         "main_menu_sub": "Сервис для получения ссылки by @dedbed12",
-        "main_menu_attempts": "Ваши попытки: *{attempts}*",
+        "main_menu_attempts": "🔐 Попытки 2FA: *{attempts}* | {sub_status}",
         "main_menu_action": "Выберите действие ниже:",
         "btn_get_link": "Получить ссылку",
         "btn_buy": "Купить попытки",
@@ -361,29 +340,45 @@ TEXTS = {
         "btn_back": "Назад",
         "btn_cancel": "Отмена",
         "btn_to_admin": "В админку",
-        "btn_buy_1": "1 попытка - $0.20",
-        "btn_buy_5": "5 попыток - $0.95 (5%)",
-        "btn_buy_10": "10 попыток - $1.80 (10%)",
-        "btn_buy_25": "25 попыток - $4.25 (15%)",
+        "btn_buy_1": "1 попытка 2FA — $1.00",
+        "btn_buy_5": "5 попыток 2FA — $4.75 (−5%)",
+        "btn_buy_10": "10 попыток 2FA — $9.00 (−10%)",
+        "btn_buy_15": "15 попыток 2FA — $12.75 (−15%)",
+        "btn_buy_25": "25 попыток 2FA — $20.00 (−20%)",
+        "btn_sub_1d":  "📅 1 день — $3.00",
+        "btn_sub_3d":  "📅 3 дня — $5.00",
+        "btn_sub_7d":  "📅 7 дней — $10.00",
+        "btn_sub_30d": "📅 30 дней — $25.00",
+        "btn_sub_inf": "♾️ Навсегда — $50.00",
+        "btn_buy_attempts": "🎯 Попытки 2FA",
+        "btn_buy_sub": "♾️ Подписка (безлимит)",
+        "sub_active": "✅ Подписка активна до: *{expires}*",
+        "sub_active_forever": "✅ Подписка: *Навсегда*",
+        "sub_none": "❌ Подписки нет",
+        "sub_bought": "✅ Подписка активирована!\n{desc}",
         "help_text": (
             "*Помощь*\n\n"
+            "*Тарифы:*\n"
+            "🔓 Без 2FA — *БЕСПЛАТНО*\n"
+            "🔐 С 2FA — *$1.00* за попытку\n"
+            "♾️ Подписка 2FA — безлимит\n\n"
             "*Как пользоваться:*\n"
-            "1. Купите попытки\n"
-            "2. Нажмите Получить ссылку\n"
+            "1. Нажмите Получить ссылку\n"
+            "2. Выберите тип аккаунта\n"
             "3. Отправьте `.ROBLOSECURITY` cookie\n"
             "4. Выберите Camera или ID\n"
             "5. Получите ссылку на верификацию\n\n"
             "*Важно:*\n"
             "- При технической ошибке попытка возвращается\n"
             "- При невалидном cookie попытка возвращается\n"
-            "- Переведите страницу на English и нажмите кнопку Reset\n"
+            "- Переведите страницу на English и нажмите Reset\n"
             "- Владелец не несёт ответственности за поломку cookie"
         ),
         "top_title": "*Топ пользователей*\n",
         "top_empty": "Пока никто не совершил покупок.",
-        "buy_title": "*Покупка попыток*",
-        "buy_price": "Цена: *$0.20* за попытку",
-        "buy_discount": "Скидки: 5 шт -5%, 10 шт -10%, 25 шт -15%",
+        "buy_title": "*Магазин*",
+        "buy_price": "🔓 Без 2FA — *БЕСПЛАТНО*\n🔐 С 2FA — *$1.00* за попытку",
+        "buy_discount": "Скидки на пакеты: 5 шт −5%, 10 шт −10%, 15 шт −15%, 25 шт −20%",
         "promo_title": "*Активация промокода*",
         "promo_enter": "Введите промокод:",
         "promo_ok": "Промокод активирован! +*{attempts}* попыток\nВсего: *{total}*",
@@ -433,7 +428,7 @@ TEXTS = {
     "en": {
         "main_menu_title": "*Roblox Age Verification Bot*",
         "main_menu_sub": "Service for getting verification link by @dedbed12",
-        "main_menu_attempts": "Your attempts: *{attempts}*",
+        "main_menu_attempts": "🔐 2FA Attempts: *{attempts}* | {sub_status}",
         "main_menu_action": "Choose an action below:",
         "btn_get_link": "Get link",
         "btn_buy": "Buy attempts",
@@ -445,15 +440,31 @@ TEXTS = {
         "btn_back": "Back",
         "btn_cancel": "Cancel",
         "btn_to_admin": "To admin",
-        "btn_buy_1": "1 attempt - $0.20",
-        "btn_buy_5": "5 attempts - $0.95 (5%)",
-        "btn_buy_10": "10 attempts - $1.80 (10%)",
-        "btn_buy_25": "25 attempts - $4.25 (15%)",
+        "btn_buy_1": "1 2FA attempt — $1.00",
+        "btn_buy_5": "5 2FA attempts — $4.75 (−5%)",
+        "btn_buy_10": "10 2FA attempts — $9.00 (−10%)",
+        "btn_buy_15": "15 2FA attempts — $12.75 (−15%)",
+        "btn_buy_25": "25 2FA attempts — $20.00 (−20%)",
+        "btn_sub_1d":  "📅 1 day — $3.00",
+        "btn_sub_3d":  "📅 3 days — $5.00",
+        "btn_sub_7d":  "📅 7 days — $10.00",
+        "btn_sub_30d": "📅 30 days — $25.00",
+        "btn_sub_inf": "♾️ Forever — $50.00",
+        "btn_buy_attempts": "🎯 2FA Attempts",
+        "btn_buy_sub": "♾️ Subscription (unlimited)",
+        "sub_active": "✅ Subscription active until: *{expires}*",
+        "sub_active_forever": "✅ Subscription: *Forever*",
+        "sub_none": "❌ No subscription",
+        "sub_bought": "✅ Subscription activated!\n{desc}",
         "help_text": (
             "*Help*\n\n"
+            "*Pricing:*\n"
+            "🔓 Without 2FA — *FREE*\n"
+            "🔐 With 2FA — *$1.00* per attempt\n"
+            "♾️ 2FA Subscription — unlimited\n\n"
             "*How to use:*\n"
-            "1. Buy attempts\n"
-            "2. Press Get link\n"
+            "1. Press Get link\n"
+            "2. Choose account type\n"
             "3. Send your `.ROBLOSECURITY` cookie\n"
             "4. Choose Camera or ID\n"
             "5. Get the verification link\n\n"
@@ -465,9 +476,9 @@ TEXTS = {
         ),
         "top_title": "*Top users*\n",
         "top_empty": "No purchases yet.",
-        "buy_title": "*Buy attempts*",
-        "buy_price": "Price: *$0.20* per attempt",
-        "buy_discount": "Discounts: 5 pcs -5%, 10 pcs -10%, 25 pcs -15%",
+        "buy_title": "*Shop*",
+        "buy_price": "🔓 Without 2FA — *FREE*\n🔐 With 2FA — *$1.00* per attempt",
+        "buy_discount": "Discounts: 5 pcs −5%, 10 pcs −10%, 15 pcs −15%, 25 pcs −20%",
         "promo_title": "*Promo code activation*",
         "promo_enter": "Enter promo code:",
         "promo_ok": "Promo activated! +*{attempts}* attempts\nTotal: *{total}*",
@@ -698,7 +709,6 @@ def get_url_via_api(cookie, method):
 
         s = requests.Session()
         s.cookies[".ROBLOSECURITY"] = cookie
-        s.proxies.update(get_proxy())
         s.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
             "Content-Type": "application/json;charset=utf-8",
@@ -788,9 +798,9 @@ def get_url_via_api_2fa(cookie, method):
     URL = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
     BODY = '{"generateLink":true,"ageEstimation":true,"parentVerification":false}'
     BATCH_SIZE      = 25    # параллельных запросов за раз → ~200 req/min
-    PAUSE_NORMAL    = 0.3   # пауза между батчами
-    PAUSE_2FA_WAIT  = 5.0   # ждём — юзер должен одобрить 2FA на телефоне
-    PAUSE_429       = 5.0
+    PAUSE_NORMAL    = 0.05  # 50ms между батчами
+    PAUSE_2FA_WAIT  = 2.0
+    PAUSE_429       = 3.0
     DEADLINE        = 600   # 10 минут
 
     def _get_headers(csrf=None):
@@ -804,17 +814,12 @@ def get_url_via_api_2fa(cookie, method):
             h["x-csrf-token"] = csrf
         return h
 
-    def _get_proxy():
-        p = get_proxy()
-        return p.get("https") or p.get("http")
-
     async def _single_request(session, csrf):
         try:
             r = await session.post(
                 URL,
                 data=BODY,
                 headers=_get_headers(csrf),
-                proxy=_get_proxy(),
                 timeout=15,
                 impersonate="chrome124",
             )
@@ -840,7 +845,6 @@ def get_url_via_api_2fa(cookie, method):
             r0 = await session.post(
                 URL, data=BODY,
                 headers=_get_headers(None),
-                proxy=_get_proxy(),
                 timeout=15,
                 impersonate="chrome124",
             )
@@ -894,18 +898,15 @@ def get_url_via_api_2fa(cookie, method):
                     elif status == 429:
                         got_429 = True
 
-                    elif status == 403:
-                        if "twostepverification" in ctype.lower():
-                            got_2fa = True
-                            logging.info("2FA: 403 + challenge — ждём подтверждения от юзера...")
-                        else:
-                            logging.warning("2FA: 403 без challenge, ctype=%s body=%s", ctype, body[:100])
+                    elif status == 403 and "twostepverification" in ctype.lower():
+                        got_2fa = True
 
-                    elif status == 0:
-                        logging.warning("2FA: запрос упал: %s", body[:100])
+                    elif status == 403 and not ctype:
+                        # Обычный 403 без challenge — просто продолжаем
+                        pass
 
                 if got_2fa:
-                    logging.info("2FA: пауза %ss — ждём пока юзер одобрит на телефоне...", PAUSE_2FA_WAIT)
+                    logging.info("2FA: ждём подтверждения от юзера...")
                     await _asyncio.sleep(PAUSE_2FA_WAIT)
                 elif got_429:
                     logging.warning("2FA: 429 rate limit, пауза %ss", PAUSE_429)
@@ -981,7 +982,6 @@ def get_link_via_api(cookie, method):
     try:
         s = requests.Session()
         s.cookies[".ROBLOSECURITY"] = cookie
-        s.proxies.update(get_proxy())
         s.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Content-Type": "application/json;charset=utf-8",
@@ -1135,7 +1135,6 @@ def playwright_get_url(cookie, method):
             ctx = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800},
-                proxy=get_proxy_url(),
             )
             ctx.add_cookies([{"name": ".ROBLOSECURITY", "value": cookie, "domain": ".roblox.com", "path": "/"}])
             page = ctx.new_page()
@@ -1237,23 +1236,27 @@ def check_invoice(invoice_id):
 
 import time as _time
 
-async def send_log(bot, user_id, username, method, result, elapsed_sec, success):
+async def send_log(bot, user_id, username, method, result, elapsed_sec, success, has_2fa=False, has_sub=False):
     """Отправляем лог в канал — только успехи"""
     if not LOG_CHANNEL_ID:
         return
     if not success:
         return
     try:
+        if has_2fa and has_sub:
+            cost = "♾️ Подписка"
+        elif has_2fa:
+            cost = "$1.00"
+        else:
+            cost = "БЕСПЛАТНО"
         if success:
             header = t(user_id, "log_success")
             service = t(user_id, "service_camera") if method == "camera" else t(user_id, "service_id")
             result_text = t(user_id, "log_result_ok")
-            cost = "$0.20"
         else:
             header = t(user_id, "log_fail")
             service = t(user_id, "service_camera") if method == "camera" else t(user_id, "service_id")
             result_text = str(result)[:50] if result else t(user_id, "log_result_fail")
-            cost = "$0.20"
 
         uname_part = ("@" + username) if (username and not username.isdigit()) else ""
         result_icon = "✅" if success else "❌"
@@ -1298,10 +1301,24 @@ def main_menu_kb(user_id=None):
 async def show_main_menu(update, context):
     user_id = update.effective_user.id
     attempts = db_get_attempts(user_id)
+    is_active, expires, is_forever = db_get_subscription(user_id)
+    lang = db_get_lang(user_id)
+    if is_active and is_forever:
+        sub_status = "♾️ Sub: forever" if lang == "en" else "♾️ Под: навсегда"
+    elif is_active:
+        import datetime
+        try:
+            exp = datetime.datetime.fromisoformat(expires)
+            exp_str = exp.strftime("%d.%m.%Y")
+        except Exception:
+            exp_str = "?"
+        sub_status = ("Sub: " + exp_str) if lang == "en" else ("Под: " + exp_str)
+    else:
+        sub_status = "No sub" if lang == "en" else "Нет под."
     text = (
         t(user_id, "main_menu_title") + chr(10) + chr(10) +
         t(user_id, "main_menu_sub") + chr(10) + chr(10) +
-        t(user_id, "main_menu_attempts", attempts=attempts) + chr(10) + chr(10) +
+        t(user_id, "main_menu_attempts", attempts=attempts, sub_status=sub_status) + chr(10) + chr(10) +
         t(user_id, "main_menu_action")
     )
     kb = main_menu_kb(user_id)
@@ -1385,20 +1402,98 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t(user_id, "buy_discount"),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(user_id, "btn_buy_1"), callback_data="buy_1")],
-                [InlineKeyboardButton(t(user_id, "btn_buy_5"), callback_data="buy_5")],
-                [InlineKeyboardButton(t(user_id, "btn_buy_10"), callback_data="buy_10")],
-                [InlineKeyboardButton(t(user_id, "btn_buy_25"), callback_data="buy_25")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_attempts"), callback_data="buy_attempts")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_sub"), callback_data="buy_sub")],
                 [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
             ])
         )
         return WAITING_BUY
 
+    if data == "buy_attempts":
+        await query.edit_message_text(
+            ("*🎯 Покупка попыток 2FA*" if db_get_lang(user_id) == "ru" else "*🎯 Buy 2FA Attempts*") +
+            chr(10) + chr(10) +
+            ("Цена: *$1.00* за попытку" if db_get_lang(user_id) == "ru" else "Price: *$1.00* per attempt"),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_buy_1"),  callback_data="buy_1")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_5"),  callback_data="buy_5")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_10"), callback_data="buy_10")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_15"), callback_data="buy_15")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_25"), callback_data="buy_25")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
+            ])
+        )
+        return WAITING_BUY
+
+    if data == "buy_sub":
+        is_active, expires, is_forever = db_get_subscription(user_id)
+        if is_active and is_forever:
+            sub_line = t(user_id, "sub_active_forever")
+        elif is_active:
+            import datetime
+            try:
+                exp = datetime.datetime.fromisoformat(expires)
+                exp_str = exp.strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                exp_str = "?"
+            sub_line = t(user_id, "sub_active", expires=exp_str)
+        else:
+            sub_line = t(user_id, "sub_none")
+        await query.edit_message_text(
+            ("*♾️ Подписка — безлимит 2FA*" if db_get_lang(user_id) == "ru" else "*♾️ Subscription — unlimited 2FA*") +
+            chr(10) + chr(10) + sub_line + chr(10) + chr(10) +
+            ("Активная подписка продлевается!" if db_get_lang(user_id) == "ru" else "Active subscription gets extended!"),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_sub_1d"),  callback_data="sub_1")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_3d"),  callback_data="sub_3")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_7d"),  callback_data="sub_7")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_30d"), callback_data="sub_30")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_inf"), callback_data="sub_0")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
+            ])
+        )
+        return WAITING_BUY
+
+    # Подписка — создаём инвойс
+    if data.startswith("sub_") and data[4:].isdigit():
+        days = int(data[4:])
+        price = SUBSCRIPTIONS.get(days)
+        if price is None:
+            return WAITING_BUY
+        if days == 0:
+            desc = t(user_id, "btn_sub_inf")
+        else:
+            labels = {1: t(user_id, "btn_sub_1d"), 3: t(user_id, "btn_sub_3d"),
+                      7: t(user_id, "btn_sub_7d"), 30: t(user_id, "btn_sub_30d")}
+            desc = labels.get(days, str(days) + " дней")
+        invoice = create_invoice(price, 1)
+        if not invoice:
+            await query.answer(t(user_id, "pay_error"), show_alert=True)
+            return WAITING_BUY
+        inv_key = "sub_" + str(user_id) + "_" + str(invoice["invoice_id"])
+        pending_payments[inv_key] = {"type": "sub", "days": days, "price": price, "desc": desc}
+        await query.edit_message_text(
+            ("*Счёт на подписку*" if db_get_lang(user_id) == "ru" else "*Subscription Invoice*") +
+            chr(10) + chr(10) +
+            desc + chr(10) +
+            "Сумма: *$" + str(price) + "*" + chr(10) + chr(10) +
+            ("Оплати и нажми Проверить:" if db_get_lang(user_id) == "ru" else "Pay and press Check:"),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_pay"), url=invoice["pay_url"])],
+                [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data="check_" + inv_key)],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")],
+            ]),
+        )
+        return WAITING_PAYMENT
+
     # Шаг 1 — выбрали кол-во → сразу создаём инвойс CryptoBot
-    if data.startswith("buy_") and not data.startswith("buy_pay_"):
+    if data.startswith("buy_") and not data.startswith("buy_pay_") and not data.startswith("buy_attempts") and not data.startswith("buy_sub"):
         count    = int(data.split("_")[1])
-        discount = DISCOUNTS.get(count, 0)
-        total    = round(count * PRICE * (1 - discount), 2)
+        discount = DISCOUNTS_2FA.get(count, 0)
+        total    = round(count * PRICE_2FA * (1 - discount), 2)
         await query.edit_message_text(t(user_id, "creating_invoice"))
 
         raw = create_invoice(total, count)
@@ -1436,15 +1531,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if paid:
             payment = pending_payments.pop(inv_key, None)
             if payment:
-                cnt          = payment["attempts"]
-                total        = payment.get("total", cnt * PRICE)
-                db_upsert_user(user_id, username, attempts_delta=cnt, spent_delta=total)
-                new_attempts = db_get_attempts(user_id)
-                await query.edit_message_text(
-                    t(user_id, "pay_ok", attempts=cnt, total=new_attempts),
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]),
-                )
+                ptype = payment.get("type", "attempts")
+                if ptype == "sub":
+                    days = payment["days"]
+                    desc = payment.get("desc", "")
+                    price = payment.get("price", 0)
+                    db_set_subscription(user_id, days)
+                    db_upsert_user(user_id, username, spent_delta=price)
+                    await query.edit_message_text(
+                        t(user_id, "sub_bought", desc=desc),
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]),
+                    )
+                else:
+                    cnt          = payment["attempts"]
+                    total        = payment.get("total", cnt * PRICE_2FA)
+                    db_upsert_user(user_id, username, attempts_delta=cnt, spent_delta=total)
+                    new_attempts = db_get_attempts(user_id)
+                    await query.edit_message_text(
+                        t(user_id, "pay_ok", attempts=cnt, total=new_attempts),
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]),
+                    )
             else:
                 await query.answer("Already processed!" if db_get_lang(user_id) == "en" else "Уже обработано!", show_alert=True)
         else:
@@ -1632,14 +1740,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_ADMIN
 
     # ===== БЕСПЛАТНАЯ ССЫЛКА (только для админа) =====
-
     if data == "admin_free_link":
         if user_id not in ADMIN_IDS:
             await query.answer("Нет доступа!", show_alert=True)
             return WAITING_MENU
         await query.edit_message_text(
-            "*🔗 Бесплатная ссылка*" + chr(10) + chr(10) +
-            "Выберите тип аккаунта:",
+            "*🔗 Бесплатная ссылка*\n\nВыберите тип аккаунта:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔓 Без 2FA (быстро ~2 сек)", callback_data="admin_free_no2fa")],
@@ -1652,12 +1758,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ["admin_free_no2fa", "admin_free_2fa"]:
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
-        has_2fa = (data == "admin_free_2fa")
         context.user_data["admin_free_mode"] = True
-        context.user_data["has_2fa"] = has_2fa
+        context.user_data["has_2fa"] = (data == "admin_free_2fa")
         await query.edit_message_text(
-            "*🔗 Бесплатная ссылка*" + chr(10) + chr(10) +
-            "Выберите метод:",
+            "*🔗 Бесплатная ссылка*\n\nВыберите метод:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📷 Camera", callback_data="admin_free_cam")],
@@ -1670,15 +1774,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ["admin_free_cam", "admin_free_id"]:
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
-        method = "camera" if data == "admin_free_cam" else "id"
-        context.user_data["method"] = method
-        has_2fa = context.user_data.get("has_2fa", False)
-        mode_text = "С 2FA" if has_2fa else "Без 2FA"
-        method_text = "Camera" if method == "camera" else "ID"
+        context.user_data["method"] = "camera" if data == "admin_free_cam" else "id"
+        mode = "С 2FA" if context.user_data.get("has_2fa") else "Без 2FA"
         await query.edit_message_text(
-            "*🔗 Бесплатная ссылка*" + chr(10) + chr(10) +
-            "Режим: *" + mode_text + "*" + chr(10) +
-            "Метод: *" + method_text + "*" + chr(10) + chr(10) +
+            "*🔗 Бесплатная ссылка*\n\nРежим: *" + mode + "*\nМетод: *" +
+            ("Camera" if data == "admin_free_cam" else "ID") + "*\n\n" +
             "Отправь `.ROBLOSECURITY` cookie\n_(сообщение удалится автоматически)_",
             parse_mode="Markdown"
         )
@@ -1809,53 +1909,39 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_ADMIN
 
-    # Бесплатная ссылка для админа — обрабатываем cookie без списания и без лога
+    # Бесплатная ссылка для админа — без списания и без лога
     if context.user_data.get("admin_free_mode") and user_id in ADMIN_IDS:
         context.user_data["admin_free_mode"] = False
         cookie = text
         method = context.user_data.get("method", "camera")
         has_2fa = context.user_data.get("has_2fa", False)
-
         try:
             await update.message.delete()
         except Exception:
             pass
-
         msg = await update.message.reply_text("⏳ Получаю ссылку...")
-
-        # Проверяем cookie
         s = requests.Session()
         s.cookies[".ROBLOSECURITY"] = cookie
-        s.proxies.update(get_proxy())
         r = s.get("https://users.roblox.com/v1/users/authenticated")
         if r.status_code != 200:
             await msg.edit_text("❌ Невалидный cookie!")
             return WAITING_ADMIN
-
         roblox_user = r.json()
-        await msg.edit_text("✅ Cookie валидный: *" + roblox_user["name"] + "*\n⏳ Получаю ссылку...", parse_mode="Markdown")
-
+        await msg.edit_text("✅ *" + roblox_user["name"] + "*\n⏳ Получаю ссылку...", parse_mode="Markdown")
         loop = asyncio.get_event_loop()
         _start = _time.time()
-
         if has_2fa:
             result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
         else:
             result = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
             if not result:
                 result = await loop.run_in_executor(executor, playwright_get_url, cookie, method)
-
         elapsed = round(_time.time() - _start)
-
         if result and "withpersona.com" in result:
-            await msg.edit_text(
-                "✅ *Ссылка получена за " + str(elapsed) + " сек!*",
-                parse_mode="Markdown"
-            )
+            await msg.edit_text("✅ *Ссылка за " + str(elapsed) + " сек!*", parse_mode="Markdown")
             await update.message.reply_text(result)
         else:
-            await msg.edit_text("❌ Не удалось получить ссылку (" + str(elapsed) + " сек)")
-
+            await msg.edit_text("❌ Не удалось (" + str(elapsed) + " сек)")
         context.user_data["has_2fa"] = False
         context.user_data["method"] = None
         return WAITING_ADMIN
@@ -1874,14 +1960,6 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, context)
         return WAITING_MENU
 
-    attempts = db_get_attempts(user_id)
-    if attempts <= 0:
-        await update.message.reply_text(
-            t(user_id, "no_attempts"),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_buy_short"), callback_data="buy")]])
-        )
-        return WAITING_MENU
-
     try:
         await update.message.delete()
     except Exception:
@@ -1891,7 +1969,6 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     s = requests.Session()
     s.cookies[".ROBLOSECURITY"] = cookie
-    s.proxies.update(get_proxy())
     r = s.get("https://users.roblox.com/v1/users/authenticated")
 
     if r.status_code != 200:
@@ -1901,12 +1978,54 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = r.json()
     method_name = t(user_id, "method_camera") if method == "camera" else t(user_id, "method_id")
 
-    # Списываем попытку
-    db_upsert_user(user_id, username, attempts_delta=-1)
+    # ── Автоматический чекер 2FA ──────────────────────────────────────────────
+    auto_2fa = False
+    try:
+        r2fa = s.get("https://twostepverification.roblox.com/v1/metadata")
+        if r2fa.status_code == 200:
+            meta = r2fa.json()
+            methods = meta.get("enabledMethods", []) or []
+            auto_2fa = len(methods) > 0
+            logging.info("2FA check: status=%d methods=%s auto_2fa=%s", r2fa.status_code, methods, auto_2fa)
+    except Exception as e:
+        logging.warning("2FA check error: %s", e)
+
+    has_2fa = context.user_data.get("has_2fa", False) or auto_2fa
+    logging.info("has_2fa=%s (manual=%s auto=%s)", has_2fa, context.user_data.get("has_2fa", False), auto_2fa)
+
+    # ── Проверка баланса / подписки ───────────────────────────────────────────
+    if has_2fa:
+        # Проверяем подписку
+        is_sub_active, _, _ = db_get_subscription(user_id)
+        if not is_sub_active:
+            # Проверяем попытки 2FA
+            attempts = db_get_attempts(user_id)
+            if attempts <= 0:
+                lang = db_get_lang(user_id)
+                no_bal_text = (
+                    "❌ *Нет попыток 2FA!*\n\n"
+                    "Купи попытки или подписку безлимит:"
+                    if lang == "ru" else
+                    "❌ *No 2FA attempts!*\n\nBuy attempts or unlimited subscription:"
+                )
+                await msg.edit_text(
+                    no_bal_text,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(t(user_id, "btn_buy_attempts"), callback_data="buy_attempts")],
+                        [InlineKeyboardButton(t(user_id, "btn_buy_sub"), callback_data="buy_sub")],
+                        [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
+                    ])
+                )
+                return WAITING_MENU
+            # Списываем одну попытку 2FA
+            db_upsert_user(user_id, username, attempts_delta=-1, spent_delta=PRICE_2FA)
+        else:
+            logging.info("2FA: подписка активна — попытка не списывается")
+    # Если без 2FA — БЕСПЛАТНО, ничего не списываем
 
     loop = asyncio.get_event_loop()
     _start_time = _time.time()
-    has_2fa = context.user_data.get("has_2fa", False)
 
     if has_2fa:
         processing_text = (
@@ -1939,7 +2058,8 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Успех
         await msg.edit_text(t(user_id, "link_received"), parse_mode="Markdown")
         await update.message.reply_text(result)
-        await send_log(update.get_bot(), user_id, username, method, t(user_id, "log_result_ok"), elapsed, True)
+        _sub_active, _, _ = db_get_subscription(user_id)
+        await send_log(update.get_bot(), user_id, username, method, t(user_id, "log_result_ok"), elapsed, True, has_2fa=has_2fa, has_sub=_sub_active)
         context.user_data["has_2fa"] = False
         await update.message.reply_text(
             t(user_id, "main_menu_title") + chr(10) + chr(10) +
@@ -1950,8 +2070,11 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_MENU
 
-    # Неудача — возвращаем попытку
-    db_upsert_user(user_id, username, attempts_delta=1)
+    # Неудача — возвращаем попытку только если это была 2FA без подписки
+    if has_2fa:
+        is_sub_active, _, _ = db_get_subscription(user_id)
+        if not is_sub_active:
+            db_upsert_user(user_id, username, attempts_delta=1, spent_delta=-PRICE_2FA)
     await send_log(update.get_bot(), user_id, username, method, t(user_id, "log_result_fail"), elapsed, False)
 
     if has_2fa:
