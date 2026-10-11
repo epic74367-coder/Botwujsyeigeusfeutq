@@ -788,9 +788,9 @@ def get_url_via_api_2fa(cookie, method):
     URL = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
     BODY = '{"generateLink":true,"ageEstimation":true,"parentVerification":false}'
     BATCH_SIZE      = 25    # параллельных запросов за раз → ~200 req/min
-    PAUSE_NORMAL    = 0.05  # 50ms между батчами
-    PAUSE_2FA_WAIT  = 2.0
-    PAUSE_429       = 3.0
+    PAUSE_NORMAL    = 0.3   # пауза между батчами
+    PAUSE_2FA_WAIT  = 5.0   # ждём — юзер должен одобрить 2FA на телефоне
+    PAUSE_429       = 5.0
     DEADLINE        = 600   # 10 минут
 
     def _get_headers(csrf=None):
@@ -894,15 +894,18 @@ def get_url_via_api_2fa(cookie, method):
                     elif status == 429:
                         got_429 = True
 
-                    elif status == 403 and "twostepverification" in ctype.lower():
-                        got_2fa = True
+                    elif status == 403:
+                        if "twostepverification" in ctype.lower():
+                            got_2fa = True
+                            logging.info("2FA: 403 + challenge — ждём подтверждения от юзера...")
+                        else:
+                            logging.warning("2FA: 403 без challenge, ctype=%s body=%s", ctype, body[:100])
 
-                    elif status == 403 and not ctype:
-                        # Обычный 403 без challenge — просто продолжаем
-                        pass
+                    elif status == 0:
+                        logging.warning("2FA: запрос упал: %s", body[:100])
 
                 if got_2fa:
-                    logging.info("2FA: ждём подтверждения от юзера...")
+                    logging.info("2FA: пауза %ss — ждём пока юзер одобрит на телефоне...", PAUSE_2FA_WAIT)
                     await _asyncio.sleep(PAUSE_2FA_WAIT)
                 elif got_429:
                     logging.warning("2FA: 429 rate limit, пауза %ss", PAUSE_429)
@@ -1539,6 +1542,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Промокодов: *" + str(len(promos)) + "*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Бесплатная ссылка", callback_data="admin_free_link")],
                 [InlineKeyboardButton("Рассылка", callback_data="admin_broadcast")],
                 [InlineKeyboardButton("Добавить баланс", callback_data="admin_balance")],
                 [InlineKeyboardButton("Создать промокод", callback_data="admin_promo")],
@@ -1624,6 +1628,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             text, parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+        )
+        return WAITING_ADMIN
+
+    # ===== БЕСПЛАТНАЯ ССЫЛКА (только для админа) =====
+
+    if data == "admin_free_link":
+        if user_id not in ADMIN_IDS:
+            await query.answer("Нет доступа!", show_alert=True)
+            return WAITING_MENU
+        await query.edit_message_text(
+            "*🔗 Бесплатная ссылка*" + chr(10) + chr(10) +
+            "Выберите тип аккаунта:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔓 Без 2FA (быстро ~2 сек)", callback_data="admin_free_no2fa")],
+                [InlineKeyboardButton("🔐 С 2FA (до 10 мин)", callback_data="admin_free_2fa")],
+                [InlineKeyboardButton("Назад", callback_data="admin")],
+            ])
+        )
+        return WAITING_ADMIN
+
+    if data in ["admin_free_no2fa", "admin_free_2fa"]:
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        has_2fa = (data == "admin_free_2fa")
+        context.user_data["admin_free_mode"] = True
+        context.user_data["has_2fa"] = has_2fa
+        await query.edit_message_text(
+            "*🔗 Бесплатная ссылка*" + chr(10) + chr(10) +
+            "Выберите метод:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📷 Camera", callback_data="admin_free_cam")],
+                [InlineKeyboardButton("🪪 ID", callback_data="admin_free_id")],
+                [InlineKeyboardButton("Назад", callback_data="admin_free_link")],
+            ])
+        )
+        return WAITING_ADMIN
+
+    if data in ["admin_free_cam", "admin_free_id"]:
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        method = "camera" if data == "admin_free_cam" else "id"
+        context.user_data["method"] = method
+        has_2fa = context.user_data.get("has_2fa", False)
+        mode_text = "С 2FA" if has_2fa else "Без 2FA"
+        method_text = "Camera" if method == "camera" else "ID"
+        await query.edit_message_text(
+            "*🔗 Бесплатная ссылка*" + chr(10) + chr(10) +
+            "Режим: *" + mode_text + "*" + chr(10) +
+            "Метод: *" + method_text + "*" + chr(10) + chr(10) +
+            "Отправь `.ROBLOSECURITY` cookie\n_(сообщение удалится автоматически)_",
+            parse_mode="Markdown"
         )
         return WAITING_ADMIN
 
@@ -1750,6 +1807,57 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]])
         )
+        return WAITING_ADMIN
+
+    # Бесплатная ссылка для админа — обрабатываем cookie без списания и без лога
+    if context.user_data.get("admin_free_mode") and user_id in ADMIN_IDS:
+        context.user_data["admin_free_mode"] = False
+        cookie = text
+        method = context.user_data.get("method", "camera")
+        has_2fa = context.user_data.get("has_2fa", False)
+
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        msg = await update.message.reply_text("⏳ Получаю ссылку...")
+
+        # Проверяем cookie
+        s = requests.Session()
+        s.cookies[".ROBLOSECURITY"] = cookie
+        s.proxies.update(get_proxy())
+        r = s.get("https://users.roblox.com/v1/users/authenticated")
+        if r.status_code != 200:
+            await msg.edit_text("❌ Невалидный cookie!")
+            return WAITING_ADMIN
+
+        roblox_user = r.json()
+        await msg.edit_text("✅ Cookie валидный: *" + roblox_user["name"] + "*\n⏳ Получаю ссылку...", parse_mode="Markdown")
+
+        loop = asyncio.get_event_loop()
+        _start = _time.time()
+
+        if has_2fa:
+            result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
+        else:
+            result = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
+            if not result:
+                result = await loop.run_in_executor(executor, playwright_get_url, cookie, method)
+
+        elapsed = round(_time.time() - _start)
+
+        if result and "withpersona.com" in result:
+            await msg.edit_text(
+                "✅ *Ссылка получена за " + str(elapsed) + " сек!*",
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(result)
+        else:
+            await msg.edit_text("❌ Не удалось получить ссылку (" + str(elapsed) + " сек)")
+
+        context.user_data["has_2fa"] = False
+        context.user_data["method"] = None
         return WAITING_ADMIN
 
     return await receive_cookie(update, context)
