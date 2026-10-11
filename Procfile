@@ -1,1 +1,1 @@
-web: playwright install chromium && python bot.py
+python -m playwright install chromium && python bot.py
