@@ -1509,7 +1509,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         inv_key = f"cb_{invoice['invoice_id']}"
         pending_payments[inv_key] = {"user_id": user_id, "attempts": count, "total": total, "provider": "cb"}
         await query.edit_message_text(
-            t(user_id, "invoice_created", amount=f"${total}", attempts=count),
+            t(user_id, "invoice_created", amount=f"${total:.2f}", attempts=count),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(t(user_id, "btn_pay"), url=invoice["pay_url"])],
@@ -1560,18 +1560,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_MENU
 
     if data == "get_link":
-        attempts = db_get_attempts(user_id)
-        if attempts <= 0:
-            await query.edit_message_text(
-                "*" + t(user_id, "no_attempts") + "*",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(t(user_id, "btn_buy"), callback_data="buy")],
-                    [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
-                ])
-            )
-            return WAITING_MENU
-        # Шаг 1 — спрашиваем про 2FA
+        # Шаг 1 — спрашиваем про 2FA (без проверки попыток — без 2FA бесплатно)
         await query.edit_message_text(
             t(user_id, "ask_2fa"),
             reply_markup=InlineKeyboardMarkup([
