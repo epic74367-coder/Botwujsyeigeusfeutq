@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = [
+  "pip install python-telegram-bot==20.7 requests playwright",
+  "playwright install chromium"
+]
+
+[start]
+cmd = "python bot.py"
