@@ -36,39 +36,92 @@ WORKER_SECRET = os.environ.get("WORKER_SECRET", "mysecret")
 _worker_index = 0
 _worker_lock = __import__("threading").Lock()
 
-def get_next_worker() -> str | None:
+# ── health-кэш: какие воркеры живы прямо сейчас (в памяти процесса) ─────────
+_worker_health = {url: True for url in _WORKER_URLS}
+_worker_health_lock = __import__("threading").Lock()
+WORKER_HEALTH_TTL = int(os.environ.get("WORKER_HEALTH_TTL", 30))  # через сколько сек снова пробовать "мёртвый"
+_worker_dead_since: dict[str, float] = {}
+
+
+def _mark_worker(url: str, alive: bool):
+    with _worker_health_lock:
+        _worker_health[url] = alive
+        if alive:
+            _worker_dead_since.pop(url, None)
+        else:
+            _worker_dead_since.setdefault(url, __import__("time").time())
+
+
+def _worker_considered_alive(url: str) -> bool:
+    """Мёртвый воркер снова пробуем через WORKER_HEALTH_TTL сек — вдруг его включили обратно."""
+    with _worker_health_lock:
+        if _worker_health.get(url, True):
+            return True
+        dead_since = _worker_dead_since.get(url, 0)
+        return (__import__("time").time() - dead_since) >= WORKER_HEALTH_TTL
+
+
+def get_worker_order() -> list[str]:
+    """Round-robin порядок воркеров; живые — впереди мёртвых."""
     global _worker_index
     if not _WORKER_URLS:
-        return None
+        return []
     with _worker_lock:
-        url = _WORKER_URLS[_worker_index % len(_WORKER_URLS)]
+        start = _worker_index % len(_WORKER_URLS)
         _worker_index += 1
-    return url
+    ordered = _WORKER_URLS[start:] + _WORKER_URLS[:start]
+    alive = [u for u in ordered if _worker_considered_alive(u)]
+    dead  = [u for u in ordered if u not in alive]
+    return alive + dead  # мёртвых тоже пробуем последними — вдруг их уже подняли
+
 
 def call_worker_2fa(cookie: str, method: str) -> str | None:
-    """Отправляет задачу на один из воркеров по round-robin."""
-    worker_url = get_next_worker()
-    if not worker_url:
+    """
+    Round-robin + failover: если воркер выключен/недоступен —
+    сразу переключается на следующий, пока не получит ответ
+    или не кончится список воркеров.
+    """
+    order = get_worker_order()
+    if not order:
         logging.warning("Нет доступных воркеров, используем локальный метод")
         return get_url_via_api_2fa(cookie, method)
-    try:
-        logging.info("Отправляю на воркер: %s", worker_url)
-        r = requests.post(
-            f"{worker_url}/get-link",
-            json={"cookie": cookie, "method": method, "secret": WORKER_SECRET},
-            headers={"X-Secret": WORKER_SECRET},
-            timeout=620,  # чуть больше DEADLINE воркера (600s)
-        )
-        if r.status_code == 200:
-            link = r.json().get("link")
-            logging.info("Воркер вернул ссылку: %s", link)
-            return link
-        else:
-            logging.error("Воркер вернул ошибку %d: %s", r.status_code, r.text[:200])
-            return None
-    except Exception as e:
-        logging.error("Ошибка связи с воркером %s: %s", worker_url, e)
-        return None
+
+    last_error = None
+    for i, worker_url in enumerate(order):
+        try:
+            logging.info("[%d/%d] Отправляю на воркер: %s", i + 1, len(order), worker_url)
+            r = requests.post(
+                f"{worker_url}/get-link",
+                json={"cookie": cookie, "method": method, "secret": WORKER_SECRET},
+                headers={"X-Secret": WORKER_SECRET},
+                timeout=620,  # чуть больше DEADLINE воркера
+            )
+            if r.status_code == 200:
+                link = r.json().get("link")
+                logging.info("Воркер %s вернул ссылку: %s", worker_url, link)
+                _mark_worker(worker_url, True)
+                return link
+
+            logging.error("Воркер %s вернул ошибку %d: %s", worker_url, r.status_code, r.text[:200])
+            last_error = f"http_{r.status_code}"
+            # сервер ответил (жив), просто не нашёл ссылку — не помечаем мёртвым,
+            # но пробуем следующий воркер на случай если там получится быстрее
+            continue
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # сервер реально недоступен/выключен — сразу переключаемся
+            logging.warning("Воркер %s недоступен (%s) — переключаюсь на следующий",
+                             worker_url, type(e).__name__)
+            _mark_worker(worker_url, False)
+            last_error = "unreachable"
+            continue
+        except Exception as e:
+            logging.error("Ошибка связи с воркером %s: %s", worker_url, e)
+            last_error = str(e)
+            continue
+
+    logging.error("Все %d воркер(ов) не дали результата (last_error=%s)", len(order), last_error)
+    return None
 
 ADMIN_IDS = set(map(int, os.environ.get("ADMIN_IDS", "0").split(",")))
 LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID", "")  # ID канала для логов
