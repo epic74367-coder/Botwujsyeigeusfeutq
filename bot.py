@@ -142,6 +142,10 @@ WAITING_ADMIN_BROADCAST = 7
 WAITING_ADMIN_ADD_BALANCE = 8
 WAITING_ADMIN_ADD_BALANCE_AMOUNT = 9
 WAITING_ADMIN_CREATE_PROMO = 10
+WAITING_ADMIN_ADD_SUB = 11
+WAITING_ADMIN_ADD_SUB_DAYS = 12
+WAITING_ADMIN_FILTER_USERS = 13
+WAITING_ADMIN_SEARCH_PROMO = 14
 
 # Без 2FA — БЕСПЛАТНО
 # С 2FA — $1 за попытку
@@ -358,6 +362,36 @@ def db_set_subscription(user_id, days):
     conn.commit()
     conn.close()
 
+
+def db_delete_promo(code):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM promo_codes WHERE code=?", (code,))
+    conn.commit()
+    conn.close()
+
+def db_search_promos(query: str):
+    """Ищет промокоды по подстроке (case-insensitive)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT code, attempts, uses, max_uses FROM promo_codes WHERE UPPER(code) LIKE ?",
+        ("%" + query.upper() + "%",)
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_filter_users_by_attempts(min_attempts: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT user_id, username, attempts, spent FROM users WHERE attempts >= ? ORDER BY attempts DESC",
+        (min_attempts,)
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 def db_get_lang(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -1714,9 +1748,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔗 Бесплатная ссылка", callback_data="admin_free_link")],
                 [InlineKeyboardButton("Рассылка", callback_data="admin_broadcast")],
                 [InlineKeyboardButton("Добавить баланс", callback_data="admin_balance")],
+                [InlineKeyboardButton("🎫 Управление подпиской", callback_data="admin_sub")],
                 [InlineKeyboardButton("Создать промокод", callback_data="admin_promo")],
                 [InlineKeyboardButton("Список промокодов", callback_data="admin_promo_list")],
+                [InlineKeyboardButton("🔍 Поиск промокода", callback_data="admin_promo_search")],
                 [InlineKeyboardButton("Список пользователей", callback_data="admin_users")],
+                [InlineKeyboardButton("🔢 Фильтр по попыткам", callback_data="admin_filter_users")],
                 [InlineKeyboardButton("Назад", callback_data="main_menu")],
             ])
         )
@@ -1796,6 +1833,105 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = chr(10).join(lines)
         await query.edit_message_text(
             text, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+        )
+        return WAITING_ADMIN
+
+    # ── Поиск промокода ──────────────────────────────────────────────────────
+    if data == "admin_promo_search":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "search_promo"
+        await query.edit_message_text(
+            "*🔍 Поиск промокода*\n\nВведите часть кода или точный код:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
+        )
+        return WAITING_ADMIN_SEARCH_PROMO
+
+    # ── Удалить промокод ─────────────────────────────────────────────────────
+    if data.startswith("del_promo_"):
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        code_to_del = data[10:]
+        db_delete_promo(code_to_del)
+        await query.edit_message_text(
+            "✅ Промокод `" + code_to_del + "` удалён.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+        )
+        return WAITING_ADMIN
+
+    # ── Фильтр пользователей по попыткам ────────────────────────────────────
+    if data == "admin_filter_users":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "filter_users"
+        await query.edit_message_text(
+            "*🔢 Фильтр по попыткам*\n\nВведите минимальное количество попыток (например: `5`):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
+        )
+        return WAITING_ADMIN_FILTER_USERS
+
+    # ── Управление подпиской пользователя ───────────────────────────────────
+    if data == "admin_sub":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "admin_sub_id"
+        await query.edit_message_text(
+            "*🎫 Управление подпиской*\n\nВведите Telegram ID пользователя:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
+        )
+        return WAITING_ADMIN_ADD_SUB
+
+    if data.startswith("admin_give_sub_"):
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        # format: admin_give_sub_<target_id>_<days>
+        parts = data.split("_")
+        # parts: ['admin','give','sub', target_id, days]
+        try:
+            target_id = int(parts[3])
+            days = int(parts[4])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка параметров", show_alert=True)
+            return WAITING_ADMIN
+        db_set_subscription(target_id, days)
+        row = db_get_user(target_id)
+        tname = row[0] if row else str(target_id)
+        desc = "Навсегда" if days == 0 else str(days) + " дн."
+        await query.edit_message_text(
+            "✅ Подписка выдана!\n\nПользователь: `" + str(target_id) + "` (" + tname + ")\nПериод: *" + desc + "*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+        )
+        try:
+            await update.get_bot().send_message(
+                chat_id=target_id,
+                text="🎫 Вам выдана подписка!\nПериод: *" + desc + "*",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return WAITING_ADMIN
+
+    if data.startswith("admin_revoke_sub_"):
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        try:
+            target_id = int(data[len("admin_revoke_sub_"):])
+        except ValueError:
+            await query.answer("Ошибка", show_alert=True)
+            return WAITING_ADMIN
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM subscriptions WHERE user_id=?", (target_id,))
+        conn.commit()
+        conn.close()
+        await query.edit_message_text(
+            "✅ Подписка пользователя `" + str(target_id) + "` отозвана.",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
         )
         return WAITING_ADMIN
@@ -1942,6 +2078,91 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("Неверное количество!")
         return WAITING_ADMIN
+
+    if waiting == "search_promo" and user_id in ADMIN_IDS:
+        context.user_data["waiting"] = None
+        results = db_search_promos(text.strip())
+        if not results:
+            reply_text = "🔍 Промокодов по запросу *" + text.strip() + "* не найдено."
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+        else:
+            lines = ["*🔍 Результаты поиска: " + text.strip() + "*" + chr(10)]
+            buttons = []
+            for code, atts, uses, max_uses in results:
+                lines.append("`" + code + "` — " + str(atts) + " поп. | " + str(uses) + "/" + str(max_uses))
+                buttons.append([InlineKeyboardButton("🗑 Удалить " + code, callback_data="del_promo_" + code)])
+            buttons.append([InlineKeyboardButton("Назад", callback_data="admin")])
+            reply_text = chr(10).join(lines)
+            kb = InlineKeyboardMarkup(buttons)
+        await update.message.reply_text(reply_text, parse_mode="Markdown", reply_markup=kb)
+        return WAITING_ADMIN
+
+    if waiting == "filter_users" and user_id in ADMIN_IDS:
+        context.user_data["waiting"] = None
+        try:
+            min_att = int(text.strip())
+        except ValueError:
+            await update.message.reply_text(
+                "Неверное значение! Введите число.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+            )
+            return WAITING_ADMIN
+        rows = db_filter_users_by_attempts(min_att)
+        if not rows:
+            reply_text = "Пользователей с ≥ " + str(min_att) + " попытками не найдено."
+        else:
+            lines = ["*Пользователи с ≥ " + str(min_att) + " попытками* (" + str(len(rows)) + " чел.)" + chr(10)]
+            for uid, uname, atts, spent in rows[:30]:
+                lines.append("ID: `" + str(uid) + "` | " + (uname or "?") +
+                              " | " + str(atts) + " поп. | $" + str(round(spent, 2)))
+            if len(rows) > 30:
+                lines.append("_... и ещё " + str(len(rows) - 30) + " пользователей_")
+            reply_text = chr(10).join(lines)
+        if len(reply_text) > 4000:
+            reply_text = reply_text[:4000] + "..."
+        await update.message.reply_text(
+            reply_text, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+        )
+        return WAITING_ADMIN
+
+    if waiting == "admin_sub_id" and user_id in ADMIN_IDS:
+        try:
+            target_id = int(text.strip())
+            context.user_data["admin_sub_target"] = target_id
+            context.user_data["waiting"] = None
+        except ValueError:
+            await update.message.reply_text(
+                "Неверный ID!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+            )
+            return WAITING_ADMIN_ADD_SUB
+        row = db_get_user(target_id)
+        tname = row[0] if row else str(target_id)
+        is_active, expires, is_forever = db_get_subscription(target_id)
+        if is_active and is_forever:
+            sub_line = "♾️ Навсегда"
+        elif is_active:
+            sub_line = "до " + str(expires)[:16]
+        else:
+            sub_line = "нет подписки"
+        await update.message.reply_text(
+            "*🎫 Подписка пользователя*\n\n"
+            "ID: `" + str(target_id) + "` (" + tname + ")\n"
+            "Статус: " + sub_line + "\n\n"
+            "Выберите действие:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📅 +1 день",    callback_data="admin_give_sub_" + str(target_id) + "_1")],
+                [InlineKeyboardButton("📅 +3 дня",    callback_data="admin_give_sub_" + str(target_id) + "_3")],
+                [InlineKeyboardButton("📅 +7 дней",   callback_data="admin_give_sub_" + str(target_id) + "_7")],
+                [InlineKeyboardButton("📅 +30 дней",  callback_data="admin_give_sub_" + str(target_id) + "_30")],
+                [InlineKeyboardButton("♾️ Навсегда",  callback_data="admin_give_sub_" + str(target_id) + "_0")],
+                [InlineKeyboardButton("❌ Отозвать",   callback_data="admin_revoke_sub_" + str(target_id))],
+                [InlineKeyboardButton("Назад",         callback_data="admin")],
+            ])
+        )
+        return WAITING_ADMIN_ADD_SUB
 
     if waiting == "create_promo" and user_id in ADMIN_IDS:
         context.user_data["waiting"] = None
@@ -2218,6 +2439,14 @@ def main():
             WAITING_ADMIN_ADD_BALANCE_AMOUNT:[CallbackQueryHandler(handle_callback),
                                              MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
             WAITING_ADMIN_CREATE_PROMO:     [CallbackQueryHandler(handle_callback),
+                                             MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_ADD_SUB:          [CallbackQueryHandler(handle_callback),
+                                             MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_ADD_SUB_DAYS:     [CallbackQueryHandler(handle_callback),
+                                             MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_FILTER_USERS:     [CallbackQueryHandler(handle_callback),
+                                             MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_SEARCH_PROMO:     [CallbackQueryHandler(handle_callback),
                                              MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start), CommandHandler("lan", lan_command)],
