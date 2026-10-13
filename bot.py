@@ -653,7 +653,9 @@ INJECT_SCRIPT = r"""
 """
 
 CAMERA_TEXTS = [
-    "Continue with camera", "Continue with Camera",
+    "Continue with camera",
+    "Continue with Camera",
+    # Другие языки (запасные)
     "Continuar con la camara", "Continuar com camera",
     "Continuer avec la camera", "Mit Kamera fortfahren",
     "Continua con la fotocamera", "Продолжить с камерой",
@@ -663,7 +665,11 @@ CAMERA_TEXTS = [
 ]
 
 ID_TEXTS = [
-    "Continue with ID", "Continue with Id",
+    "Continue with ID",
+    "Continue with Id",
+    # Запасной вариант — просто Continue (если нет "with ID")
+    "Continue",
+    # Другие языки (запасные)
     "Continuar con ID", "Continuar com ID",
     "Continuer avec ID", "Mit Ausweis fortfahren",
     "Continua con ID", "Продолжить с удостоверением",
@@ -1975,7 +1981,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if has_2fa:
             result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
         else:
-            result = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
+            result = await loop.run_in_executor(executor, get_link_via_api, cookie, method)
             if not result:
                 result = await loop.run_in_executor(executor, playwright_get_url, cookie, method)
         elapsed = round(_time.time() - _start)
@@ -2085,8 +2091,8 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
         logging.info("2FA worker result: %s", result)
     else:
-        # Сначала быстрый API метод (~2 сек)
-        result = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
+        # Сначала быстрый API метод (~2 сек) — используем полный парсер
+        result = await loop.run_in_executor(executor, get_link_via_api, cookie, method)
         logging.info("API result: %s", result)
 
         # Если API не сработал — используем Playwright (~30 сек)
