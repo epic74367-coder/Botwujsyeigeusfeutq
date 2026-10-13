@@ -858,7 +858,7 @@ def get_url_via_api_2fa(cookie, method):
     BODY = '{"generateLink":true,"ageEstimation":true,"parentVerification":false}'
     BATCH_SIZE      = 25    # параллельных запросов за раз → ~200 req/min
     PAUSE_NORMAL    = 0.05  # 50ms между батчами
-    PAUSE_2FA_WAIT  = 2.0
+    PAUSE_2FA_WAIT  = 5.0   # 5 сек — даём пользователю время нажать approve
     PAUSE_429       = 3.0
     DEADLINE        = 600   # 10 минут
 
@@ -957,7 +957,8 @@ def get_url_via_api_2fa(cookie, method):
                     elif status == 429:
                         got_429 = True
 
-                    elif status == 403 and "twostepverification" in ctype.lower():
+                    elif status == 403 and ctype:
+                        # Любой challenge-type (TwoStepVerification, twostep, и т.д.)
                         got_2fa = True
 
                     elif status == 403 and not ctype:
@@ -1357,27 +1358,39 @@ def main_menu_kb(user_id=None):
     return InlineKeyboardMarkup(buttons)
 
 
-async def show_main_menu(update, context):
-    user_id = update.effective_user.id
+def _sub_status_text(user_id):
+    """
+    Возвращает (attempts_display, sub_status) для главного меню.
+    - При активной подписке: attempts_display = "∞", sub_status = оставшееся время
+    - Иначе: attempts_display = фактическое число, sub_status = "Нет под."
+    """
+    import datetime as _dt
     attempts = db_get_attempts(user_id)
     is_active, expires, is_forever = db_get_subscription(user_id)
     lang = db_get_lang(user_id)
     if is_active and is_forever:
-        sub_status = "♾️ Sub: forever" if lang == "en" else "♾️ Под: навсегда"
+        return "∞", ("♾️ Forever" if lang == "en" else "♾️ Навсегда")
     elif is_active:
-        import datetime
         try:
-            exp = datetime.datetime.fromisoformat(expires)
-            exp_str = exp.strftime("%d.%m.%Y")
+            exp = _dt.datetime.fromisoformat(expires)
+            delta = exp - _dt.datetime.utcnow()
+            total_min = max(0, int(delta.total_seconds() // 60))
+            h, m = divmod(total_min, 60)
+            remaining = (f"{h}h {m}m" if lang == "en" else f"{h}ч {m}мин")
         except Exception:
-            exp_str = "?"
-        sub_status = ("Sub: " + exp_str) if lang == "en" else ("Под: " + exp_str)
+            remaining = "?"
+        return "∞", remaining
     else:
-        sub_status = "No sub" if lang == "en" else "Нет под."
+        return str(attempts), ("No sub" if lang == "en" else "Нет под.")
+
+
+async def show_main_menu(update, context):
+    user_id = update.effective_user.id
+    attempts_display, sub_status = _sub_status_text(user_id)
     text = (
         t(user_id, "main_menu_title") + chr(10) + chr(10) +
         t(user_id, "main_menu_sub") + chr(10) + chr(10) +
-        t(user_id, "main_menu_attempts", attempts=attempts, sub_status=sub_status) + chr(10) + chr(10) +
+        t(user_id, "main_menu_attempts", attempts=attempts_display, sub_status=sub_status) + chr(10) + chr(10) +
         t(user_id, "main_menu_action")
     )
     kb = main_menu_kb(user_id)
@@ -1948,10 +1961,12 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             max_uses = 1
         db_create_promo(new_code, atts, max_uses)
         await update.message.reply_text(
-            "*Промокод создан!*" + chr(10) + chr(10) +
+            "✅ *Промокод создан*" + chr(10) +
+            "━━━━━━━━━━━━━━━━━━━━━━" + chr(10) +
             "Код: `" + new_code + "`" + chr(10) +
-            "Попыток: *" + str(atts) + "*" + chr(10) +
-            "Использований: *" + str(max_uses) + "*",
+            "Сумма: *" + str(atts) + "* попыток" + chr(10) +
+            "Лимит: *" + str(max_uses) + "*" + chr(10) +
+            "Срок: ∞ дней",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]])
         )
@@ -2038,8 +2053,11 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning("2FA check error: %s", e)
 
-    has_2fa = context.user_data.get("has_2fa", False) or auto_2fa
-    logging.info("has_2fa=%s (manual=%s auto=%s)", has_2fa, context.user_data.get("has_2fa", False), auto_2fa)
+    # Используем ТОЛЬКО выбор пользователя — без override через auto_2fa.
+    # auto_2fa логируем для отладки, но на тарификацию он не влияет.
+    # Если юзер выбрал "Без 2FA" → бесплатно, даже если на аккаунте есть 2FA методы.
+    has_2fa = context.user_data.get("has_2fa", False)
+    logging.info("has_2fa=%s (user_choice=%s auto_detected=%s)", has_2fa, has_2fa, auto_2fa)
 
     # ── Проверка баланса / подписки ───────────────────────────────────────────
     if has_2fa:
@@ -2109,9 +2127,10 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _sub_active, _, _ = db_get_subscription(user_id)
         await send_log(update.get_bot(), user_id, username, method, t(user_id, "log_result_ok"), elapsed, True, has_2fa=has_2fa, has_sub=_sub_active)
         context.user_data["has_2fa"] = False
+        _at, _ss = _sub_status_text(user_id)
         await update.message.reply_text(
             t(user_id, "main_menu_title") + chr(10) + chr(10) +
-            t(user_id, "main_menu_attempts", attempts=db_get_attempts(user_id)) + chr(10) + chr(10) +
+            t(user_id, "main_menu_attempts", attempts=_at, sub_status=_ss) + chr(10) + chr(10) +
             t(user_id, "main_menu_action"),
             parse_mode="Markdown",
             reply_markup=main_menu_kb(user_id)
@@ -2147,9 +2166,10 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.edit_text(t(user_id, "failed_returned"))
 
+        _at, _ss = _sub_status_text(user_id)
         await update.message.reply_text(
             t(user_id, "main_menu_title") + chr(10) + chr(10) +
-            t(user_id, "main_menu_attempts", attempts=db_get_attempts(user_id)) + chr(10) + chr(10) +
+            t(user_id, "main_menu_attempts", attempts=_at, sub_status=_ss) + chr(10) + chr(10) +
             t(user_id, "main_menu_action"),
             parse_mode="Markdown",
             reply_markup=main_menu_kb(user_id)
