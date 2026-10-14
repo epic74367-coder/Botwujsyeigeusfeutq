@@ -123,6 +123,34 @@ def call_worker_2fa(cookie: str, method: str) -> str | None:
     logging.error("Все %d воркер(ов) не дали результата (last_error=%s)", len(order), last_error)
     return None
 
+
+def call_worker_fast(cookie: str, method: str) -> str | None:
+    """Вызов воркера через быстрый эндпоинт для аккаунтов без 2FA."""
+    order = get_worker_order()
+    if not order:
+        logging.warning("Нет доступных воркеров, используем локальный API")
+        return get_link_via_api(cookie, method)
+
+    for worker_url in order:
+        try:
+            r = requests.post(
+                f"{worker_url}/get-link-fast",
+                json={"cookie": cookie, "method": method, "secret": WORKER_SECRET},
+                headers={"X-Secret": WORKER_SECRET},
+                timeout=30,
+            )
+            if r.status_code == 200:
+                link = r.json().get("link")
+                if link:
+                    _mark_worker(worker_url, True)
+                    return link
+        except Exception as e:
+            logging.error("Ошибка fast воркера %s: %s", worker_url, e)
+            continue
+
+    return None
+
+
 ADMIN_IDS = set(map(int, os.environ.get("ADMIN_IDS", "0").split(",")))
 LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID", "")  # ID канала для логов
 
@@ -2242,9 +2270,9 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if has_2fa:
             result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
         else:
-            result = await loop.run_in_executor(executor, get_link_via_api, cookie, method)
+            result = await loop.run_in_executor(executor, call_worker_fast, cookie, method)
             if not result:
-                result = await loop.run_in_executor(executor, playwright_get_url, cookie, method)
+                result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
         elapsed = round(_time.time() - _start)
         if result and "withpersona.com" in result:
             await msg.edit_text("✅ *Ссылка за " + str(elapsed) + " сек!*", parse_mode="Markdown")
@@ -2355,14 +2383,15 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
         logging.info("2FA worker result: %s", result)
     else:
-        # Сначала быстрый API метод (~2 сек) — используем полный парсер
-        result = await loop.run_in_executor(executor, get_link_via_api, cookie, method)
-        logging.info("API result: %s", result)
+        # Сначала пробуем получить ссылку быстро через воркер (с прокси)
+        result = await loop.run_in_executor(executor, call_worker_fast, cookie, method)
+        logging.info("Fast worker API result: %s", result)
 
-        # Если API не сработал — используем Playwright (~30 сек)
+        # Если быстрый метод не сработал, запускаем браузер через воркер (run_no2fa_worker)
         if not result:
             await msg.edit_text(t(user_id, "browser_fallback"))
-            result = await loop.run_in_executor(executor, playwright_get_url, cookie, method)
+            # Обычный вызов воркера сам разберется и запустит no2fa_worker
+            result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
 
     elapsed = round(_time.time() - _start_time)
 
