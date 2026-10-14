@@ -65,13 +65,11 @@ def get_worker_order() -> list[str]:
 def call_worker_2fa(cookie: str, method: str) -> str | None:
     order = get_worker_order()
     if not order:
-        logging.warning("Нет доступных воркеров, используем локальный метод 2FA")
         return get_url_via_api_2fa(cookie, method)
 
     last_error = None
     for i, worker_url in enumerate(order):
         try:
-            logging.info("[%d/%d] Отправляю на воркер: %s", i + 1, len(order), worker_url)
             r = requests.post(
                 f"{worker_url}/get-link",
                 json={"cookie": cookie, "method": method, "secret": WORKER_SECRET},
@@ -80,12 +78,11 @@ def call_worker_2fa(cookie: str, method: str) -> str | None:
             )
             if r.status_code == 200:
                 link = r.json().get("link")
-                logging.info("Воркер %s вернул ссылку: %s", worker_url, link)
                 _mark_worker(worker_url, True)
                 return link
             last_error = f"http_{r.status_code}"
             continue
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             _mark_worker(worker_url, False)
             last_error = "unreachable"
             continue
@@ -100,7 +97,6 @@ LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID", "")
 executor = ThreadPoolExecutor(max_workers=20)
 pending_payments = {}
 
-WAITING_RULES = 0
 WAITING_MENU = 1
 WAITING_COOKIE = 2
 WAITING_BUY = 3
@@ -112,11 +108,8 @@ WAITING_ADMIN_ADD_BALANCE = 8
 WAITING_ADMIN_ADD_BALANCE_AMOUNT = 9
 WAITING_ADMIN_CREATE_PROMO = 10
 WAITING_ADMIN_ADD_SUB = 11
-WAITING_ADMIN_ADD_SUB_DAYS = 12
-WAITING_ADMIN_REMOVE_BALANCE = 13
-WAITING_ADMIN_REMOVE_BALANCE_AMOUNT = 14
-WAITING_ADMIN_SEARCH_PROMO = 15
-WAITING_ADMIN_FILTER_USERS = 16
+WAITING_ADMIN_REMOVE_BALANCE = 12
+WAITING_ADMIN_REMOVE_BALANCE_AMOUNT = 13
 
 PRICE_2FA = 1.00
 DISCOUNTS_2FA = {5: 0.05, 10: 0.10, 15: 0.15, 25: 0.20}
@@ -207,13 +200,6 @@ def db_get_all_promos():
     rows = c.fetchall()
     conn.close()
     return rows
-
-def db_delete_promo(code):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM promo_codes WHERE code=?", (code,))
-    conn.commit()
-    conn.close()
 
 def db_get_subscription(user_id):
     import datetime
@@ -309,7 +295,6 @@ TEXTS = {
         "top_empty": "Пока никто не совершил покупок.",
         "buy_title": "*Магазин*",
         "buy_price": "🔓 Без 2FA — *БЕСПЛАТНО*\n🔐 С 2FA — *$1.00* за попытку",
-        "buy_discount": "Скидки на пакеты: 5 шт −5%, 10 шт −10%, 15 шт −15%, 25 шт −20%",
         "promo_title": "*Активация промокода*",
         "promo_enter": "Введите промокод:",
         "promo_ok": "Промокод активирован! +*{attempts}* попыток\nВсего: *{total}*",
@@ -319,20 +304,10 @@ TEXTS = {
         "checking_cookie": "Проверяю cookie...",
         "invalid_cookie": "Неверный cookie! Попробуй снова.\n\n/start",
         "processing": "Аккаунт: *{name}*\nМетод: *{method}*\nОсталось попыток: *{attempts}*\n\nЖди 20-30 сек...",
-        "browser_fallback": "API не ответил, открываю браузер...",
-        "error_returned": "Техническая ошибка - попытка возвращена!\n\nПричина: {reason}\n\n/start",
-        "not_clicked_returned": "Кнопка не найдена - попытка возвращена!\n\n/start",
         "link_received": "*Ссылка получена!*\n\n⏱ Действует *10 минут* — используй сразу!\n🔗 Одноразовая ссылка:",
         "failed_returned": "❌ Не удалось получить ссылку — попытка возвращена!",
         "method_camera": "Camera",
         "method_id": "ID",
-        "service_camera": "Ссылка Camera (Лицо)",
-        "service_id": "Ссылка ID (Паспорт)",
-        "log_success": "✅ УСПЕШНО",
-        "log_fail": "❌ НЕУДАЧА",
-        "log_result_ok": "Ссылка получена",
-        "log_result_fail": "Не удалось получить ссылку",
-        "anon": "Аноним",
         "choose_method": "*Выберите метод верификации:*",
         "btn_camera": "📷 Camera (Лицо)",
         "btn_id": "🪪 ID (Паспорт)",
@@ -342,9 +317,7 @@ TEXTS = {
         "pay_ok": "*Оплата получена!*\nНачислено *{attempts}* попыток\nВсего: *{total}*",
         "pay_pending": "Оплата ещё не получена. Попробуй позже.",
         "pay_error": "Ошибка создания счёта!",
-        "lang_choose": "🌐 Выберите язык / Choose language:",
         "lang_set": "✅ Язык установлен: Русский",
-        "cancelled": "Отменено. /start",
         "ask_2fa": "На каком аккаунте получить ссылку?",
         "btn_no_2fa": "🔓 Без 2FA",
         "btn_with_2fa": "🔐 С 2FA",
@@ -385,7 +358,6 @@ TEXTS = {
         "top_empty": "No purchases yet.",
         "buy_title": "*Shop*",
         "buy_price": "🔓 Without 2FA — *FREE*\n🔐 With 2FA — *$1.00* per attempt",
-        "buy_discount": "Discounts: 5 pcs −5%, 10 pcs −10%, 15 pcs −15%, 25 pcs −20%",
         "promo_title": "*Promo code activation*",
         "promo_enter": "Enter promo code:",
         "promo_ok": "Promo activated! +*{attempts}* attempts\nTotal: *{total}*",
@@ -395,20 +367,10 @@ TEXTS = {
         "checking_cookie": "Checking cookie...",
         "invalid_cookie": "Invalid cookie! Try again.\n\n/start",
         "processing": "Account: *{name}*\nMethod: *{method}*\nAttempts left: *{attempts}*\n\nPlease wait 20-30 sec...",
-        "browser_fallback": "API didn't respond, opening browser...",
-        "error_returned": "Technical error - attempt returned!\n\nReason: {reason}\n\n/start",
-        "not_clicked_returned": "Button not found - attempt returned!\n\n/start",
         "link_received": "*Link received!*\n\n⏱ Valid for *10 minutes* — use it now!\n🔗 One-time link:",
         "failed_returned": "❌ Failed to get link — attempt returned!",
         "method_camera": "Camera",
         "method_id": "ID",
-        "service_camera": "Camera link (Face)",
-        "service_id": "ID link (Passport)",
-        "log_success": "✅ SUCCESS",
-        "log_fail": "❌ FAILURE",
-        "log_result_ok": "Link received",
-        "log_result_fail": "Failed to get link",
-        "anon": "Anonymous",
         "choose_method": "*Choose verification method:*",
         "btn_camera": "📷 Camera (Face)",
         "btn_id": "🪪 ID (Passport)",
@@ -418,9 +380,7 @@ TEXTS = {
         "pay_ok": "*Payment received!*\nAdded *{attempts}* attempts\nTotal: *{total}*",
         "pay_pending": "Payment not received yet. Try later.",
         "pay_error": "Invoice creation error!",
-        "lang_choose": "🌐 Выберите язык / Choose language:",
         "lang_set": "✅ Language set: English",
-        "cancelled": "Cancelled. /start",
         "ask_2fa": "Which account type do you want to verify?",
         "btn_no_2fa": "🔓 Without 2FA",
         "btn_with_2fa": "🔐 With 2FA",
@@ -435,13 +395,7 @@ def t(user_id, key, **kwargs):
         text = text.format(**kwargs)
     return text
 
-def t_lang(lang, key, **kwargs):
-    text = TEXTS.get(lang, TEXTS["ru"]).get(key, TEXTS["ru"].get(key, key))
-    if kwargs:
-        text = text.format(**kwargs)
-    return text
-
-def get_link_via_api(cookie, method):
+def get_url_via_api(cookie, method):
     try:
         s = requests.Session()
         s.cookies[".ROBLOSECURITY"] = cookie
@@ -469,6 +423,9 @@ def get_link_via_api(cookie, method):
         logging.error("API error: %s", e)
         return None
 
+def get_url_via_api_2fa(cookie, method):
+    return call_worker_2fa(cookie, method)
+
 def extract_link_from_raw(body: str):
     if not body:
         return None
@@ -479,9 +436,9 @@ def extract_link_from_raw(body: str):
     if m:
         inq_id = m.group(1)
         tok_m = re.search(r'session-token=([A-Za-z0-9_\-\.]+)', body)
-        link = "https://inquiry.withpersona.com/verify?inquiry-id=" + inq_id
+        link = f"https://inquiry.withpersona.com/verify?inquiry-id={inq_id}"
         if tok_m:
-            link += "&session-token=" + tok_m.group(1)
+            link += f"&session-token={tok_m.group(1)}"
         return link
     return None
 
@@ -570,13 +527,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = tg.username or tg.first_name or "Аноним"
     data = query.data
 
-    if data.startswith("set_lang_"):
-        lang = data.split("_")[2]
-        db_set_lang(user_id, lang)
-        await query.edit_message_text(TEXTS[lang]["lang_set"], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TEXTS[lang]["btn_back"], callback_data="main_menu")]]))
-        return WAITING_MENU
-
-    if data in ["main_menu", "accept_rules"]:
+    if data == "main_menu":
         attempts, sub_status = _sub_status_text(user_id)
         text = f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_sub')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}"
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
@@ -605,7 +556,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_PROMO
 
     if data == "buy":
-        await query.edit_message_text(f"{t(user_id, 'buy_title')}\n\n{t(user_id, 'buy_price')}\n\n{t(user_id, 'buy_discount')}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        await query.edit_message_text(f"{t(user_id, 'buy_title')}\n\n{t(user_id, 'buy_price')}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(t(user_id, "btn_buy_attempts"), callback_data="buy_attempts")],
             [InlineKeyboardButton(t(user_id, "btn_buy_sub"), callback_data="buy_sub")],
             [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
@@ -709,33 +660,73 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(t(user_id, "2fa_ask_cookie"), parse_mode="Markdown")
         return WAITING_COOKIE
 
+    # ПОЛНАЯ АДМИН ПАНЕЛЬ
     if data == "admin":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
         rows = db_get_all_users()
-        await query.edit_message_text(f"Админ панель\nПользователей: {len(rows)}", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Список промокодов", callback_data="admin_promo_list")],
-            [InlineKeyboardButton("Создать промокод", callback_data="admin_promo")],
-            [InlineKeyboardButton("Назад", callback_data="main_menu")],
-        ]))
+        promos = db_get_all_promos()
+        await query.edit_message_text(
+            f"🛠 *Админ панель*\n\nПользователей: *{len(rows)}*\nПромокодов: *{len(promos)}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👥 Список пользователей", callback_data="admin_users")],
+                [InlineKeyboardButton("🎫 Список промокодов", callback_data="admin_promo_list")],
+                [InlineKeyboardButton("➕ Добавить попытки", callback_data="admin_add_bal"), InlineKeyboardButton("➖ Отнять попытки", callback_data="admin_rem_bal")],
+                [InlineKeyboardButton("🎟️ Выдать подписку", callback_data="admin_add_sub")],
+                [InlineKeyboardButton("➕ Создать промокод", callback_data="admin_create_promo")],
+                [InlineKeyboardButton("🏠 На главную", callback_data="main_menu")],
+            ])
+        )
+        return WAITING_ADMIN
+
+    if data == "admin_users":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        rows = db_get_all_users()
+        lines = ["*👥 Список пользователей (все):*\n"]
+        for uid, uname, atts, spent in rows[:30]:
+            lines.append(f"ID: `{uid}` | @{uname or '---'} | Поп: {atts} | ${round(spent, 2)}")
+        await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В админку", callback_data="admin")]]))
         return WAITING_ADMIN
 
     if data == "admin_promo_list":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
         rows = db_get_all_promos()
-        lines = ["Список промокодов:"]
+        lines = ["*🎫 Список промокодов:*\n"]
         for code, atts, uses, max_uses in rows:
-            lines.append(f"`{code}` - {atts} поп. | {uses}/{max_uses}")
-        await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]]))
+            lines.append(f"`{code}` — {atts} поп. | Использовано: {uses}/{max_uses}")
+        await query.edit_message_text("\n".join(lines) if rows else "Промокодов нет.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В админку", callback_data="admin")]]))
         return WAITING_ADMIN
 
-    if data == "admin_promo":
+    if data == "admin_add_bal":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
-        context.user_data["waiting"] = "create_promo"
-        await query.edit_message_text("Введите промокод в формате: `КОД ПОПЫТКИ ИСПОЛЬЗОВАНИЙ`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]]))
-        return WAITING_ADMIN_CREATE_PROMO
+        context.user_data["waiting"] = "admin_add_bal_id"
+        await query.edit_message_text("➕ *Добавить попытки*\n\nВведите Telegram ID пользователя:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        return WAITING_ADMIN_ADD_BALANCE
+
+    if data == "admin_rem_bal":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "admin_rem_bal_id"
+        await query.edit_message_text("➖ *Отнять попытки*\n\nВведите Telegram ID пользователя:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        return WAITING_ADMIN_REMOVE_BALANCE
+
+    if data == "admin_add_sub":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "admin_add_sub_id"
+        await query.edit_message_text("🎟️ *Выдать подписку*\n\nВведите Telegram ID пользователя:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        return WAITING_ADMIN_ADD_SUB
+
+    if data == "admin_create_promo":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "admin_create_promo_text"
+        await query.edit_message_text("🎟️ *Создание промокода*\n\nВведите в формате: `КОД ПОПЫТКИ ЛИМИТ`\nПример: `VIP 10 5`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        return WAITING_ADMIN
 
     return WAITING_MENU
 
@@ -756,12 +747,81 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(user_id, "promo_not_found"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
         return WAITING_MENU
 
-    if waiting == "create_promo" and user_id in ADMIN_IDS:
-        context.user_data["waiting"] = None
-        parts = text.split()
-        db_create_promo(parts[0].upper(), int(parts[1]) if len(parts) > 1 else 1, int(parts[2]) if len(parts) > 2 else 1)
-        await update.message.reply_text("✅ Промокод создан!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
-        return WAITING_ADMIN
+    if user_id in ADMIN_IDS:
+        if waiting == "admin_add_bal_id":
+            try:
+                context.user_data["target_uid"] = int(text)
+                context.user_data["waiting"] = "admin_add_bal_amt"
+                await update.message.reply_text("Введите количество попыток для добавления:")
+                return WAITING_ADMIN_ADD_BALANCE_AMOUNT
+            except ValueError:
+                await update.message.reply_text("Ошибка! Введите числовой ID.")
+                return WAITING_ADMIN_ADD_BALANCE
+
+        elif waiting == "admin_add_bal_amt":
+            context.user_data["waiting"] = None
+            target_uid = context.user_data.get("target_uid")
+            try:
+                amt = int(text)
+                db_upsert_user(target_uid, "AdminAdded", attempts_delta=amt)
+                await update.message.reply_text(f"✅ Успешно добавлено {amt} попыток пользователю `{target_uid}`!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+            except ValueError:
+                await update.message.reply_text("Ошибка! Введите число.")
+            return WAITING_ADMIN
+
+        elif waiting == "admin_rem_bal_id":
+            try:
+                context.user_data["target_uid"] = int(text)
+                context.user_data["waiting"] = "admin_rem_bal_amt"
+                await update.message.reply_text("Введите количество попыток для списания:")
+                return WAITING_ADMIN_REMOVE_BALANCE_AMOUNT
+            except ValueError:
+                await update.message.reply_text("Ошибка! Введите числовой ID.")
+                return WAITING_ADMIN_REMOVE_BALANCE
+
+        elif waiting == "admin_rem_bal_amt":
+            context.user_data["waiting"] = None
+            target_uid = context.user_data.get("target_uid")
+            try:
+                amt = int(text)
+                cur = db_get_attempts(target_uid)
+                to_rem = min(amt, cur)
+                db_upsert_user(target_uid, "AdminRem", attempts_delta=-to_rem)
+                await update.message.reply_text(f"✅ Списано {to_rem} попыток у пользователя `{target_uid}`!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+            except ValueError:
+                await update.message.reply_text("Ошибка! Введите число.")
+            return WAITING_ADMIN
+
+        elif waiting == "admin_add_sub_id":
+            try:
+                context.user_data["target_uid"] = int(text)
+                context.user_data["waiting"] = "admin_add_sub_days"
+                await update.message.reply_text("Введите количество дней подписки (0 — навсегда):")
+                return WAITING_ADMIN
+            except ValueError:
+                await update.message.reply_text("Ошибка! Введите числовой ID.")
+                return WAITING_ADMIN
+
+        elif waiting == "admin_add_sub_days":
+            context.user_data["waiting"] = None
+            target_uid = context.user_data.get("target_uid")
+            try:
+                days = int(text)
+                db_set_subscription(target_uid, days)
+                await update.message.reply_text(f"✅ Подписка выдана пользователю `{target_uid}` на {('навсегда' if days==0 else f'{days} дней')}!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+            except ValueError:
+                await update.message.reply_text("Ошибка!")
+            return WAITING_ADMIN
+
+        elif waiting == "admin_create_promo_text":
+            context.user_data["waiting"] = None
+            parts = text.split()
+            if len(parts) >= 3:
+                db_create_promo(parts[0].upper(), int(parts[1]), int(parts[2]))
+                await update.message.reply_text(f"✅ Промокод `{parts[0].upper()}` на {parts[1]} попыток успешно создан!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+            else:
+                await update.message.reply_text("Неверный формат! Формат: КОД ПОПЫТКИ ЛИМИТ")
+            return WAITING_ADMIN
 
     return await receive_cookie(update, context)
 
@@ -774,7 +834,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = tg.username or tg.first_name or "Аноним"
 
     if not method:
-        await show_main_menu(update, context)
+        await update.message.reply_text("Сначала выберите метод верификации через /start")
         return WAITING_MENU
 
     try:
@@ -810,7 +870,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if has_2fa:
         result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
     else:
-        result = await loop.run_in_executor(executor, get_link_via_api, cookie, method)
+        result = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
 
     elapsed = round(_time.time() - _start_time)
 
@@ -831,19 +891,11 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}", parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
     return WAITING_MENU
 
-async def lan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🌐 Выберите язык:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🇷🇺 Русский", callback_data="set_lang_ru"), InlineKeyboardButton("🇬🇧 English", callback_data="set_lang_en")]]))
-    return WAITING_MENU
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено. /start")
-    return ConversationHandler.END
-
 def main():
     db_init()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start), CommandHandler("lan", lan_command)],
+        entry_points=[CommandHandler("start", start)],
         states={
             WAITING_MENU: [CallbackQueryHandler(handle_callback)],
             WAITING_COOKIE: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
@@ -851,9 +903,12 @@ def main():
             WAITING_PAYMENT: [CallbackQueryHandler(handle_callback)],
             WAITING_PROMO: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
             WAITING_ADMIN: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN_CREATE_PROMO: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_ADD_BALANCE: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_ADD_BALANCE_AMOUNT: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_REMOVE_BALANCE: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_ADMIN_REMOVE_BALANCE_AMOUNT: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        fallbacks=[CommandHandler("start", start)],
         per_user=True, per_chat=True, block=False,
     )
     app.add_handler(conv)
