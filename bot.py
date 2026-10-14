@@ -144,8 +144,8 @@ WAITING_ADMIN_ADD_BALANCE_AMOUNT = 9
 WAITING_ADMIN_CREATE_PROMO = 10
 WAITING_ADMIN_ADD_SUB = 11
 WAITING_ADMIN_ADD_SUB_DAYS = 12
-WAITING_ADMIN_FILTER_USERS = 13
-WAITING_ADMIN_SEARCH_PROMO = 14
+WAITING_ADMIN_REMOVE_BALANCE = 13
+WAITING_ADMIN_REMOVE_BALANCE_AMOUNT = 14
 
 # Без 2FA — БЕСПЛАТНО
 # С 2FA — $1 за попытку
@@ -1751,9 +1751,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🎫 Управление подпиской", callback_data="admin_sub")],
                 [InlineKeyboardButton("Создать промокод", callback_data="admin_promo")],
                 [InlineKeyboardButton("Список промокодов", callback_data="admin_promo_list")],
-                [InlineKeyboardButton("🔍 Поиск промокода", callback_data="admin_promo_search")],
                 [InlineKeyboardButton("Список пользователей", callback_data="admin_users")],
-                [InlineKeyboardButton("🔢 Фильтр по попыткам", callback_data="admin_filter_users")],
+                [InlineKeyboardButton("➕ Добавить попытки", callback_data="admin_balance"),
+                 InlineKeyboardButton("➖ Отнять попытки", callback_data="admin_remove_balance")],
                 [InlineKeyboardButton("Назад", callback_data="main_menu")],
             ])
         )
@@ -1803,6 +1803,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
         )
         return WAITING_ADMIN_ADD_BALANCE
+
+    if data == "admin_remove_balance":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "remove_balance_id"
+        await query.edit_message_text(
+            "*➖ Отнять попытки*" + chr(10) + chr(10) + "Введите Telegram ID пользователя:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
+        )
+        return WAITING_ADMIN_REMOVE_BALANCE
 
     if data == "admin_promo":
         if user_id not in ADMIN_IDS:
@@ -2079,51 +2090,65 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Неверное количество!")
         return WAITING_ADMIN
 
-    if waiting == "search_promo" and user_id in ADMIN_IDS:
-        context.user_data["waiting"] = None
-        results = db_search_promos(text.strip())
-        if not results:
-            reply_text = "🔍 Промокодов по запросу *" + text.strip() + "* не найдено."
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
-        else:
-            lines = ["*🔍 Результаты поиска: " + text.strip() + "*" + chr(10)]
-            buttons = []
-            for code, atts, uses, max_uses in results:
-                lines.append("`" + code + "` — " + str(atts) + " поп. | " + str(uses) + "/" + str(max_uses))
-                buttons.append([InlineKeyboardButton("🗑 Удалить " + code, callback_data="del_promo_" + code)])
-            buttons.append([InlineKeyboardButton("Назад", callback_data="admin")])
-            reply_text = chr(10).join(lines)
-            kb = InlineKeyboardMarkup(buttons)
-        await update.message.reply_text(reply_text, parse_mode="Markdown", reply_markup=kb)
-        return WAITING_ADMIN
-
-    if waiting == "filter_users" and user_id in ADMIN_IDS:
-        context.user_data["waiting"] = None
+    if waiting == "remove_balance_id" and user_id in ADMIN_IDS:
         try:
-            min_att = int(text.strip())
+            target_id = int(text.strip())
+            context.user_data["remove_target_id"] = target_id
+            context.user_data["waiting"] = "remove_balance_amount"
         except ValueError:
             await update.message.reply_text(
-                "Неверное значение! Введите число.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+                "Неверный ID!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
             )
-            return WAITING_ADMIN
-        rows = db_filter_users_by_attempts(min_att)
-        if not rows:
-            reply_text = "Пользователей с ≥ " + str(min_att) + " попытками не найдено."
-        else:
-            lines = ["*Пользователи с ≥ " + str(min_att) + " попытками* (" + str(len(rows)) + " чел.)" + chr(10)]
-            for uid, uname, atts, spent in rows[:30]:
-                lines.append("ID: `" + str(uid) + "` | " + (uname or "?") +
-                              " | " + str(atts) + " поп. | $" + str(round(spent, 2)))
-            if len(rows) > 30:
-                lines.append("_... и ещё " + str(len(rows) - 30) + " пользователей_")
-            reply_text = chr(10).join(lines)
-        if len(reply_text) > 4000:
-            reply_text = reply_text[:4000] + "..."
+            return WAITING_ADMIN_REMOVE_BALANCE
+        current = db_get_attempts(target_id)
+        row = db_get_user(target_id)
+        tname = row[0] if row else str(target_id)
         await update.message.reply_text(
-            reply_text, parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin")]])
+            "*➖ Отнять попытки*\n\n"
+            "ID: `" + str(target_id) + "` (" + tname + ")\n"
+            "Сейчас попыток: *" + str(current) + "*\n\n"
+            "Введите сколько отнять:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
         )
+        return WAITING_ADMIN_REMOVE_BALANCE_AMOUNT
+
+    if waiting == "remove_balance_amount" and user_id in ADMIN_IDS:
+        context.user_data["waiting"] = None
+        target_id = context.user_data.get("remove_target_id")
+        try:
+            amount = int(text.strip())
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Неверное количество! Введите положительное число.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]])
+            )
+            return WAITING_ADMIN_REMOVE_BALANCE_AMOUNT
+        current = db_get_attempts(target_id)
+        actual = min(amount, current)   # нельзя уйти в минус
+        row = db_get_user(target_id)
+        tname = row[0] if row else str(target_id)
+        db_upsert_user(target_id, tname, attempts_delta=-actual)
+        new_atts = db_get_attempts(target_id)
+        await update.message.reply_text(
+            "*✅ Попытки отняты!*\n\n"
+            "ID: `" + str(target_id) + "` (" + tname + ")\n"
+            "Отнято: *" + str(actual) + "*\n"
+            "Осталось: *" + str(new_atts) + "*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]])
+        )
+        try:
+            await update.get_bot().send_message(
+                chat_id=target_id,
+                text="❗ У вас отняли *" + str(actual) + "* попыток.\nОсталось: *" + str(new_atts) + "*",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
         return WAITING_ADMIN
 
     if waiting == "admin_sub_id" and user_id in ADMIN_IDS:
@@ -2444,9 +2469,9 @@ def main():
                                              MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
             WAITING_ADMIN_ADD_SUB_DAYS:     [CallbackQueryHandler(handle_callback),
                                              MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN_FILTER_USERS:     [CallbackQueryHandler(handle_callback),
+            WAITING_ADMIN_REMOVE_BALANCE:   [CallbackQueryHandler(handle_callback),
                                              MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN_SEARCH_PROMO:     [CallbackQueryHandler(handle_callback),
+            WAITING_ADMIN_REMOVE_BALANCE_AMOUNT: [CallbackQueryHandler(handle_callback),
                                              MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start), CommandHandler("lan", lan_command)],
