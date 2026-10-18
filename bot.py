@@ -14,6 +14,10 @@ from telegram.ext import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+def escape_md(text: str) -> str:
+    """Экранирует спецсимволы Markdown v1 (используемого в parse_mode='Markdown')."""
+    return re.sub(r'([_*\[\]`\\])', r'\\\1', str(text))
+
 BOT_TOKEN        = os.environ.get("BOT_TOKEN")
 CRYPTO_BOT_TOKEN = os.environ.get("CRYPTO_BOT_TOKEN", "")
 DATABASE_URL     = os.environ.get("DATABASE_URL", "")  # PostgreSQL URL для Railway
@@ -26,7 +30,9 @@ _WORKER_URLS = [
         os.environ.get("WORKER_4_URL", ""),
     ] if u.strip()
 ]
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "mysecret")
+WORKER_SECRET = os.environ.get("WORKER_SECRET")
+if not WORKER_SECRET:
+    raise RuntimeError("WORKER_SECRET environment variable must be set")
 _worker_index = 0
 _worker_lock = __import__("threading").Lock()
 
@@ -48,7 +54,12 @@ def _worker_considered_alive(url: str) -> bool:
         if _worker_health.get(url, True):
             return True
         dead_since = _worker_dead_since.get(url, 0)
-        return (_time.time() - dead_since) >= WORKER_HEALTH_TTL
+        if (_time.time() - dead_since) >= WORKER_HEALTH_TTL:
+            # TTL истёк — сбрасываем флаг, воркер снова считается живым
+            _worker_health[url] = True
+            _worker_dead_since.pop(url, None)
+            return True
+        return False
 
 def get_worker_order() -> list[str]:
     global _worker_index
@@ -68,11 +79,12 @@ def call_worker_2fa(cookie: str, method: str) -> str | None:
         return get_url_via_api_2fa(cookie, method)
     for worker_url in order:
         try:
+            worker_timeout = int(os.environ.get("WORKER_TIMEOUT", 320))
             r = requests.post(
                 f"{worker_url}/get-link",
                 json={"cookie": cookie, "method": method, "secret": WORKER_SECRET},
                 headers={"X-Secret": WORKER_SECRET},
-                timeout=620,
+                timeout=worker_timeout,
             )
             if r.status_code == 200:
                 _mark_worker(worker_url, True)
@@ -85,7 +97,13 @@ def call_worker_2fa(cookie: str, method: str) -> str | None:
             continue
     return None
 
-ADMIN_IDS      = set(map(int, os.environ.get("ADMIN_IDS", "0").split(",")))
+ADMIN_IDS: set[int] = set()
+for _x in os.environ.get("ADMIN_IDS", "0").split(","):
+    try:
+        if _x.strip():
+            ADMIN_IDS.add(int(_x.strip()))
+    except ValueError:
+        logging.warning("Invalid ADMIN_IDS value: %r — пропускаем", _x)
 LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID", "")
 
 executor = ThreadPoolExecutor(max_workers=20)
@@ -98,7 +116,7 @@ WAITING_BUY                    = 3
 WAITING_PAYMENT                = 4
 WAITING_PROMO                  = 5
 WAITING_ADMIN                  = 6
-WAITING_ADMIN_BROADCAST        = 7
+# WAITING_ADMIN_BROADCAST = 7  # БАГ-14: убрано — состояние объявлено но никогда не использовалось
 WAITING_ADMIN_ADD_BALANCE      = 8
 WAITING_ADMIN_ADD_BALANCE_AMOUNT = 9
 WAITING_ADMIN_CREATE_PROMO     = 10
@@ -140,6 +158,10 @@ def db_init():
                 lang TEXT DEFAULT 'ru'
             )
         """)
+        # Миграция: добавляем колонку lang если её нет (для существующих БД)
+        c.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT DEFAULT 'ru'
+        """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
                 code TEXT PRIMARY KEY,
@@ -177,13 +199,30 @@ def db_upsert_user(user_id, username, attempts_delta=0, spent_delta=0.0):
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE
             SET username=EXCLUDED.username,
-                attempts=users.attempts + %s,
-                spent=users.spent + %s
-        """, (user_id, username, max(0, attempts_delta), spent_delta, attempts_delta, spent_delta))
+                attempts=GREATEST(0, users.attempts + %s),
+                spent=GREATEST(0.0, users.spent + %s)
+        """, (user_id, username, max(0, attempts_delta), max(0.0, spent_delta), attempts_delta, spent_delta))
 
 def db_get_attempts(user_id):
     row = db_get_user(user_id)
     return row[1] if row else 0
+
+def db_deduct_attempt(user_id, username) -> bool:
+    """Атомарно списывает 1 попытку. Возвращает True если попытка была и списана.
+    БАГ-1: один атомарный UPDATE вместо SELECT + UPDATE (защита от race condition)."""
+    with _db() as conn:
+        c = conn.cursor()
+        c.execute("""
+            UPDATE users
+            SET attempts = attempts - 1,
+                spent    = GREATEST(0.0, spent + %s)
+            WHERE user_id = %s AND attempts > 0
+        """, (PRICE_2FA, user_id))
+        if c.rowcount == 0:
+            return False
+        # Обновляем username попутно
+        c.execute("UPDATE users SET username = %s WHERE user_id = %s", (username, user_id))
+        return True
 
 def db_get_all_users():
     with _db() as conn:
@@ -204,24 +243,39 @@ def db_create_promo(code, attempts, max_uses):
             INSERT INTO promo_codes (code, attempts, uses, max_uses)
             VALUES (%s, %s, 0, %s)
             ON CONFLICT (code) DO UPDATE
-            SET attempts=EXCLUDED.attempts, max_uses=EXCLUDED.max_uses, uses=0
+            SET attempts=EXCLUDED.attempts, max_uses=EXCLUDED.max_uses
+            -- БАГ-12: uses намеренно НЕ сбрасывается при обновлении промокода
         """, (code, attempts, max_uses))
 
-def db_use_promo(user_id, code):
+def db_use_promo(user_id, code, username=""):
+    """Атомарно проверяет промокод и начисляет попытки.
+    БАГ-2: UPDATE с условием uses < max_uses вместо SELECT→check→UPDATE (защита от TOCTOU race)."""
     with _db() as conn:
         c = conn.cursor()
-        c.execute("SELECT attempts, uses, max_uses FROM promo_codes WHERE code=%s", (code,))
+        # Сначала проверяем существование кода и что пользователь ещё не использовал
+        c.execute("SELECT attempts, max_uses FROM promo_codes WHERE code=%s", (code,))
         row = c.fetchone()
         if not row:
             return False, "not_found", 0
-        attempts, uses, max_uses = row
-        if uses >= max_uses:
-            return False, "used", 0
+        attempts, max_uses = row
         c.execute("SELECT 1 FROM used_promos WHERE user_id=%s AND code=%s", (user_id, code))
         if c.fetchone():
             return False, "used_by_you", 0
-        c.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=%s", (code,))
+        # БАГ-2: атомарное увеличение uses только если ещё не исчерпан лимит
+        c.execute(
+            "UPDATE promo_codes SET uses = uses + 1 WHERE code = %s AND uses < max_uses",
+            (code,)
+        )
+        if c.rowcount == 0:
+            return False, "used", 0
         c.execute("INSERT INTO used_promos (user_id, code) VALUES (%s, %s)", (user_id, code))
+        # Атомарно начисляем попытки в той же транзакции
+        c.execute("""
+            INSERT INTO users (user_id, username, attempts, spent)
+            VALUES (%s, %s, %s, 0.0)
+            ON CONFLICT (user_id) DO UPDATE
+            SET attempts=GREATEST(0, users.attempts + %s)
+        """, (user_id, username, max(0, attempts), attempts))
         return True, "ok", attempts
 
 def db_get_all_promos():
@@ -244,7 +298,11 @@ def db_get_subscription(user_id):
     if expires_at_str:
         try:
             exp = datetime.datetime.fromisoformat(expires_at_str)
-            if exp > datetime.datetime.utcnow():
+            now = datetime.datetime.now(datetime.timezone.utc)
+            # Если exp не содержит timezone — считаем UTC
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=datetime.timezone.utc)
+            if exp > now:
                 return True, expires_at_str, False
         except Exception:
             pass
@@ -263,10 +321,12 @@ def db_set_subscription(user_id, days):
         else:
             c.execute("SELECT expires_at, is_forever FROM subscriptions WHERE user_id=%s", (user_id,))
             existing = c.fetchone()
-            now = datetime.datetime.utcnow()
+            now = datetime.datetime.now(datetime.timezone.utc)
             if existing and not existing[1] and existing[0]:
                 try:
                     exp = datetime.datetime.fromisoformat(existing[0])
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=datetime.timezone.utc)
                     if exp > now:
                         now = exp
                 except Exception:
@@ -288,7 +348,10 @@ def db_get_lang(user_id):
 def db_set_lang(user_id, lang):
     with _db() as conn:
         c = conn.cursor()
-        c.execute("UPDATE users SET lang=%s WHERE user_id=%s", (lang, user_id))
+        c.execute("""
+            INSERT INTO users (user_id, lang) VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET lang=EXCLUDED.lang
+        """, (user_id, lang))
 
 def db_is_new_user(user_id) -> bool:
     with _db() as conn:
@@ -435,7 +498,10 @@ def t(user_id, key, lang_override=None, **kwargs):
     lang = lang_override or db_get_lang(user_id) or "ru"
     text = TEXTS.get(lang, TEXTS["ru"]).get(key, TEXTS["ru"].get(key, key))
     if kwargs:
-        text = text.format(**kwargs)
+        try:
+            text = text.format(**kwargs)
+        except (KeyError, ValueError) as e:
+            logging.error("t() format error: key=%s, kwargs=%s, err=%s", key, kwargs, e)
     return text
 
 # ─────────────────────────── HELPERS ───────────────────────────
@@ -469,7 +535,8 @@ def get_url_via_api(cookie, method):
         return None
 
 def get_url_via_api_2fa(cookie, method):
-    return call_worker_2fa(cookie, method)
+    """Fallback: прямой вызов API без воркеров (только без 2FA)."""
+    return get_url_via_api(cookie, method)
 
 def extract_link_from_raw(body: str):
     if not body:
@@ -492,7 +559,8 @@ def create_invoice(amount, attempts):
         r = requests.post(
             "https://pay.crypt.bot/api/createInvoice",
             headers={"Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN},
-            json={"asset": "USDT", "amount": str(round(amount, 2)), "description": f"Pokupka {attempts} popytok", "expires_in": 300}
+            json={"asset": "USDT", "amount": str(round(amount, 2)), "description": f"Pokupka {attempts} popytok", "expires_in": 300},
+            timeout=15,
         )
         data = r.json()
         return data["result"] if data.get("ok") else None
@@ -504,7 +572,8 @@ def check_invoice(invoice_id):
         r = requests.get(
             "https://pay.crypt.bot/api/getInvoices",
             headers={"Crypto-Pay-API-Token": CRYPTO_BOT_TOKEN},
-            params={"invoice_ids": invoice_id}
+            params={"invoice_ids": invoice_id},
+            timeout=15,
         )
         data = r.json()
         return data["result"]["items"][0] if data.get("ok") and data["result"]["items"] else None
@@ -521,7 +590,7 @@ async def send_log(context, user_id, username, method, elapsed_sec, has_2fa=Fals
         msg = (
             f"✅ УСПЕШНО\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 ID: {user_id} (@{username})\n"
+            f"👤 ID: {user_id} (@{escape_md(username)})\n"
             f"⚙️ Услуга: {service}\n"
             f"✅ Результат: Ссылка получена\n"
             f"⏲️ Время: {round(elapsed_sec)} сек\n"
@@ -555,7 +624,10 @@ def _sub_status_text(user_id):
     elif is_active:
         try:
             exp = _dt.datetime.fromisoformat(expires)
-            delta = exp - _dt.datetime.utcnow()
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=_dt.timezone.utc)
+            delta = exp - now_utc
             total_min = max(0, int(delta.total_seconds() // 60))
             h, m = divmod(total_min, 60)
             remaining = f"{h}h {m}m" if lang == "en" else f"{h}ч {m}мин"
@@ -701,7 +773,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(t(user_id, "pay_error"), show_alert=True)
             return WAITING_BUY
         inv_key = f"sub_{user_id}_{invoice['invoice_id']}"
-        pending_payments[inv_key] = {"type": "sub", "days": days, "price": price, "desc": desc}
+        # БАГ-4: сохраняем user_id для проверки владельца при check_
+        pending_payments[inv_key] = {"type": "sub", "user_id": user_id, "days": days, "price": price, "desc": desc}
         await query.edit_message_text(f"Счёт на подписку: {desc}\nСумма: ${price}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(t(user_id, "btn_pay"), url=invoice["pay_url"])],
@@ -711,7 +784,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_PAYMENT
 
     if data.startswith("buy_") and data not in ("buy_attempts", "buy_sub"):
-        count = int(data.split("_")[1])
+        # БАГ-5: int() без try/except упадёт при ручном callback вида buy_abc
+        try:
+            count = int(data.split("_")[1])
+        except (ValueError, IndexError):
+            return WAITING_MENU
         discount = DISCOUNTS_2FA.get(count, 0)
         total = round(count * PRICE_2FA * (1 - discount), 2)
         raw = create_invoice(total, count)
@@ -730,16 +807,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("check_"):
         inv_key = data[6:]
-        raw_id = "_".join(inv_key.split("_")[1:])
+        # inv_key форматы: "cb_{invoice_id}" или "sub_{user_id}_{invoice_id}"
+        # invoice_id — всегда последний сегмент
+        raw_id = inv_key.split("_")[-1]
+
+        # БАГ-4: проверяем владельца ДО обращения к платёжному API
+        payment_preview = pending_payments.get(inv_key)
+        if payment_preview is not None and payment_preview.get("user_id") != user_id:
+            await query.answer("Это не ваш платёж.", show_alert=True)
+            return WAITING_MENU
+
         inv = check_invoice(raw_id)
         if inv and inv.get("status") == "paid":
             payment = pending_payments.pop(inv_key, None)
-            if payment and payment.get("type") == "sub":
+            if payment is None:
+                # Платёж уже обработан или бот перезапускался
+                await query.answer("Платёж уже обработан или сессия устарела. Обратитесь в поддержку.", show_alert=True)
+            elif payment.get("type") == "sub":
                 db_set_subscription(user_id, payment["days"])
                 db_upsert_user(user_id, username, spent_delta=payment["price"])
                 await query.edit_message_text(t(user_id, "sub_bought", desc=payment["desc"]),
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
-            elif payment:
+            else:
                 cnt = payment["attempts"]
                 db_upsert_user(user_id, username, attempts_delta=cnt, spent_delta=payment["total"])
                 await query.edit_message_text(t(user_id, "pay_ok", attempts=cnt, total=db_get_attempts(user_id)),
@@ -799,7 +888,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = db_get_all_users()
         lines = ["*👥 Список пользователей:*\n"]
         for uid, uname, atts, spent in rows[:30]:
-            lines.append(f"ID: `{uid}` | @{uname or '---'} | Поп: {atts} | ${round(spent, 2)}")
+            lines.append(f"ID: `{uid}` | @{escape_md(uname or '---')} | Поп: {atts} | ${round(spent, 2)}")
         await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В админку", callback_data="admin")]]))
         return WAITING_ADMIN
@@ -859,9 +948,8 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if waiting == "promo":
         context.user_data["waiting"] = None
-        ok, msg_key, atts = db_use_promo(user_id, text.upper())
+        ok, msg_key, atts = db_use_promo(user_id, text.upper(), username)
         if ok:
-            db_upsert_user(user_id, username, attempts_delta=atts)
             await update.message.reply_text(t(user_id, "promo_ok", attempts=atts, total=db_get_attempts(user_id)),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")]]))
@@ -888,7 +976,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 amt = int(text)
                 db_upsert_user(target_uid, "AdminAdded", attempts_delta=amt)
-                await update.message.reply_text(f"✅ +{amt} попыток → `{target_uid}`", parse_mode="Markdown",
+                await update.message.reply_text(f"✅ +{amt} попыток → `{escape_md(str(target_uid))}`", parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
             except ValueError:
                 await update.message.reply_text("Ошибка! Введите число.")
@@ -912,7 +1000,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur = db_get_attempts(target_uid)
                 to_rem = min(amt, cur)
                 db_upsert_user(target_uid, "AdminRem", attempts_delta=-to_rem)
-                await update.message.reply_text(f"✅ Списано {to_rem} попыток у `{target_uid}`", parse_mode="Markdown",
+                await update.message.reply_text(f"✅ Списано {to_rem} попыток у `{escape_md(str(target_uid))}`", parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
             except ValueError:
                 await update.message.reply_text("Ошибка! Введите число.")
@@ -923,10 +1011,10 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["target_uid"] = int(text)
                 context.user_data["waiting"] = "admin_add_sub_days"
                 await update.message.reply_text("Введите дней подписки (0 = навсегда):")
-                return WAITING_ADMIN
+                return WAITING_ADMIN_ADD_SUB
             except ValueError:
                 await update.message.reply_text("Ошибка! Числовой ID.")
-                return WAITING_ADMIN
+                return WAITING_ADMIN_ADD_SUB
 
         elif waiting == "admin_add_sub_days":
             context.user_data["waiting"] = None
@@ -935,7 +1023,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 days = int(text)
                 db_set_subscription(target_uid, days)
                 label = "навсегда" if days == 0 else f"{days} дней"
-                await update.message.reply_text(f"✅ Подписка ({label}) → `{target_uid}`", parse_mode="Markdown",
+                await update.message.reply_text(f"✅ Подписка ({label}) → `{escape_md(str(target_uid))}`", parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
             except ValueError:
                 await update.message.reply_text("Ошибка!")
@@ -945,9 +1033,13 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["waiting"] = None
             parts = text.split()
             if len(parts) >= 3:
-                db_create_promo(parts[0].upper(), int(parts[1]), int(parts[2]))
-                await update.message.reply_text(f"✅ Промокод `{parts[0].upper()}` создан!", parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+                # БАГ-6: int() без try/except падал при нечисловых значениях
+                try:
+                    db_create_promo(parts[0].upper(), int(parts[1]), int(parts[2]))
+                    await update.message.reply_text(f"✅ Промокод `{escape_md(parts[0].upper())}` создан!", parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админку", callback_data="admin")]]))
+                except ValueError:
+                    await update.message.reply_text("Ошибка! Попытки и лимит должны быть числами. Формат: КОД ПОПЫТКИ ЛИМИТ")
             else:
                 await update.message.reply_text("Неверный формат! КОД ПОПЫТКИ ЛИМИТ")
             return WAITING_ADMIN
@@ -966,16 +1058,23 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сначала выберите метод через /start")
         return WAITING_MENU
 
+    chat_id = update.effective_chat.id
+
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    msg = await update.message.reply_text(t(user_id, "checking_cookie"))
+    msg = await context.bot.send_message(chat_id=chat_id, text=t(user_id, "checking_cookie"))
 
-    s = requests.Session()
-    s.cookies[".ROBLOSECURITY"] = cookie
-    r = s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
+    # БАГ-3: не вызываем blocking requests напрямую в async — оборачиваем в executor
+    def _validate_cookie(c: str):
+        s = requests.Session()
+        s.cookies[".ROBLOSECURITY"] = c
+        return s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
+
+    loop = asyncio.get_running_loop()
+    r = await loop.run_in_executor(executor, _validate_cookie, cookie)
     if r.status_code != 200:
         await msg.edit_text(t(user_id, "invalid_cookie"))
         return WAITING_MENU
@@ -983,17 +1082,29 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = r.json()
     method_name = t(user_id, "method_camera") if method == "camera" else t(user_id, "method_id")
 
+    # БАГ-A: используем флаг attempt_was_deducted вместо повторного запроса к БД при возврате.
+    # Повторный db_get_subscription() может вернуть False если подписка истекла за 300 сек
+    # работы воркера → пользователь получил бы бесплатную попытку.
+    attempt_was_deducted = False
+
     if has_2fa:
         is_sub_active, _, _ = db_get_subscription(user_id)
         if not is_sub_active:
-            if db_get_attempts(user_id) <= 0:
+            # БАГ-1: атомарное списание попытки — один UPDATE вместо SELECT + UPDATE
+            # БАГ-B: try/except чтобы при сбое БД сообщение не зависло навсегда
+            try:
+                spent_ok = db_deduct_attempt(user_id, username)
+            except Exception as e:
+                logging.error("db_deduct_attempt error: %s", e)
+                await msg.edit_text("❌ Ошибка сервера, попробуйте позже." if (db_get_lang(user_id) or "ru") == "ru" else "❌ Server error, please try later.")
+                return WAITING_MENU
+            if not spent_ok:
                 await msg.edit_text("❌ Нет попыток 2FA!" if (db_get_lang(user_id) or "ru") == "ru" else "❌ No 2FA attempts!")
                 return WAITING_MENU
-            db_upsert_user(user_id, username, attempts_delta=-1, spent_delta=PRICE_2FA)
+            attempt_was_deducted = True
 
     await msg.edit_text(t(user_id, "processing", name=user["name"], method=method_name, attempts=db_get_attempts(user_id)), parse_mode="Markdown")
 
-    loop = asyncio.get_event_loop()
     _start_time = _time.time()
 
     if has_2fa:
@@ -1005,32 +1116,49 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logging.info("receive_cookie result: has_2fa=%s, result=%s", has_2fa, str(result)[:120] if result else None)
 
-    # Принимаем ссылку если в ней withpersona.com или inquiry-id (на случай нестандартного формата)
-    link_ok = result and ("withpersona.com" in result or "inquiry-id=" in result)
+    # БАГ-11: проверяем домен точнее — не просто подстроку, а netloc
+    def _is_valid_persona_link(url: str) -> bool:
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            return (
+                p.scheme == "https"
+                and (p.netloc == "withpersona.com" or p.netloc.endswith(".withpersona.com"))
+                and "inquiry-id" in p.query
+            )
+        except Exception:
+            return False
+
+    link_ok = result and _is_valid_persona_link(result)
     if link_ok:
         await msg.edit_text(t(user_id, "link_received"), parse_mode="Markdown")
-        await update.message.reply_text(result)
+        await context.bot.send_message(chat_id=chat_id, text=result)
         await send_log(context, user_id, username, method, elapsed, has_2fa=has_2fa)
         attempts, sub_status = _sub_status_text(user_id)
-        await update.message.reply_text(
-            f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}",
             parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
         return WAITING_MENU
 
-    # Возвращаем попытку если 2FA не сработала
-    if has_2fa and not db_get_subscription(user_id)[0]:
+    # БАГ-A: возвращаем попытку только если она реально была списана (флаг),
+    # а не по повторному запросу к БД — подписка могла истечь пока воркер работал
+    if attempt_was_deducted:
         db_upsert_user(user_id, username, attempts_delta=1, spent_delta=-PRICE_2FA)
 
     await msg.edit_text(t(user_id, "failed_returned"))
     attempts, sub_status = _sub_status_text(user_id)
-    await update.message.reply_text(
-        f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}",
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}",
         parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
     return WAITING_MENU
 
 # ─────────────────────────── MAIN ───────────────────────────
 
 def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable is not set!")
     db_init()
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -1076,6 +1204,11 @@ def main():
                 CallbackQueryHandler(handle_callback),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
             ],
+            WAITING_ADMIN_CREATE_PROMO: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            # WAITING_ADMIN_BROADCAST убрано (БАГ-14: состояние не реализовано)
         },
         fallbacks=[CommandHandler("start", start), CommandHandler("lang", lang_command)],
         per_user=True, per_chat=True, block=False,
