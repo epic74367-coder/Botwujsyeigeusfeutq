@@ -511,8 +511,9 @@ def check_invoice(invoice_id):
     except Exception:
         return None
 
-async def send_log(bot, user_id, username, method, elapsed_sec, has_2fa=False):
+async def send_log(context, user_id, username, method, elapsed_sec, has_2fa=False):
     if not LOG_CHANNEL_ID:
+        logging.warning("send_log: LOG_CHANNEL_ID не задан")
         return
     try:
         cost = "$1.00" if has_2fa else "БЕСПЛАТНО"
@@ -526,7 +527,8 @@ async def send_log(bot, user_id, username, method, elapsed_sec, has_2fa=False):
             f"⏲️ Время: {round(elapsed_sec)} сек\n"
             f"💳 Сумма: {cost}"
         )
-        await bot.send_message(chat_id=LOG_CHANNEL_ID, text=msg)
+        await context.bot.send_message(chat_id=int(LOG_CHANNEL_ID), text=msg)
+        logging.info("send_log: отправлено в %s", LOG_CHANNEL_ID)
     except Exception as e:
         logging.warning("send_log error: %s", e)
 
@@ -1001,10 +1003,14 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elapsed = round(_time.time() - _start_time)
 
-    if result and "withpersona.com" in result:
+    logging.info("receive_cookie result: has_2fa=%s, result=%s", has_2fa, str(result)[:120] if result else None)
+
+    # Принимаем ссылку если в ней withpersona.com или inquiry-id (на случай нестандартного формата)
+    link_ok = result and ("withpersona.com" in result or "inquiry-id=" in result)
+    if link_ok:
         await msg.edit_text(t(user_id, "link_received"), parse_mode="Markdown")
         await update.message.reply_text(result)
-        await send_log(update.get_bot(), user_id, username, method, elapsed, has_2fa=has_2fa)
+        await send_log(context, user_id, username, method, elapsed, has_2fa=has_2fa)
         attempts, sub_status = _sub_status_text(user_id)
         await update.message.reply_text(
             f"{t(user_id, 'main_menu_title')}\n\n{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n{t(user_id, 'main_menu_action')}",
