@@ -543,14 +543,14 @@ def get_url_via_api(cookie, method):
         r1 = s.post(url, json=body, timeout=12)
         csrf = r1.headers.get("x-csrf-token")
         if r1.status_code == 200:
-            link = extract_link_from_raw(r1.text)
+            link = _extract_link(r1)
             if link:
                 return link
         if csrf:
             s.headers["x-csrf-token"] = csrf
             r2 = s.post(url, json=body, timeout=12)
             if r2.status_code == 200:
-                return extract_link_from_raw(r2.text)
+                return _extract_link(r2)
         return None
     except Exception as e:
         logging.error("API error: %s", e)
@@ -559,6 +559,19 @@ def get_url_via_api(cookie, method):
 def get_url_via_api_2fa(cookie, method):
     """Fallback: прямой вызов API без воркеров (только без 2FA)."""
     return get_url_via_api(cookie, method)
+
+def _is_persona_link(url: str) -> bool:
+    """Проверяет что URL — валидная ссылка Persona с inquiry-id."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        return (
+            p.scheme == "https"
+            and (p.netloc == "withpersona.com" or p.netloc.endswith(".withpersona.com"))
+            and "inquiry-id" in p.query
+        )
+    except Exception:
+        return False
 
 def extract_link_from_raw(body: str):
     if not body:
@@ -576,9 +589,29 @@ def extract_link_from_raw(body: str):
         return link
     return None
 
+def _extract_link(r) -> "str | None":
+    """Извлекает Persona-ссылку из ответа: сначала из тела, затем из r.url (при redirect)."""
+    link = extract_link_from_raw(r.text)
+    if not link and _is_persona_link(r.url):
+        link = r.url
+    return link
+
 # Хранит контекст незавершённой 2FA верификации пока пользователь вводит код
-# { user_id: { cookie, csrf, challenge_id, user_roblox_id, challenge_meta, method, attempt_was_deducted, chat_id, msg_id } }
+# { user_id: { cookie, csrf, challenge_id, user_roblox_id, method, attempt_was_deducted, chat_id, username, created_at } }
 pending_2fa: dict[int, dict] = {}
+PENDING_2FA_TTL = int(os.environ.get("PENDING_2FA_TTL", 600))  # 10 минут
+
+def _cleanup_pending_2fa():
+    """Удаляет устаревшие записи pending_2fa (защита от утечки памяти).
+    Попытки НЕ возвращаются при TTL-очистке — сессия считается брошенной пользователем."""
+    now = _time.time()
+    expired = [uid for uid, ctx in pending_2fa.items()
+               if (now - ctx.get("created_at", now)) > PENDING_2FA_TTL]
+    for uid in expired:
+        ctx = pending_2fa.pop(uid, None)
+        if ctx:
+            logging.info("pending_2fa TTL expired for user_id=%s (attempt_deducted=%s)", uid, ctx.get("attempt_was_deducted"))
+    return len(expired)
 
 def verify_2fa_code(cookie: str, user_roblox_id: int, csrf: str,
                     challenge_id: str, code: str) -> tuple[bool, str | None]:
@@ -635,24 +668,55 @@ def verify_2fa_code(cookie: str, user_roblox_id: int, csrf: str,
 
         # Шаг 3: подтверждаем challenge через основной API
         continue_url = "https://apis.roblox.com/challenge/v1/continue"
+        challenge_metadata_str = (
+            f'{{"rememberDevice":false,"verificationToken":"{verification_token}",'
+            f'"challengeId":"{challenge_id}","actionType":"Generic"}}'
+        )
         r_cont = s.post(continue_url, json={
             "challengeId": challenge_id,
             "challengeType": "twostepverification",
-            "challengeMetadata": f'{{"rememberDevice":false,"verificationToken":"{verification_token}","challengeId":"{challenge_id}","actionType":"Generic"}}',
+            "challengeMetadata": challenge_metadata_str,
         }, timeout=12)
 
+        # CSRF мог обновиться — повторяем с новым токеном
+        if r_cont.status_code == 403:
+            new_csrf_cont = r_cont.headers.get("x-csrf-token")
+            if new_csrf_cont:
+                s.headers["x-csrf-token"] = new_csrf_cont
+                r_cont = s.post(continue_url, json={
+                    "challengeId": challenge_id,
+                    "challengeType": "twostepverification",
+                    "challengeMetadata": challenge_metadata_str,
+                }, timeout=12)
+                logging.info("verify_2fa_code step3 retry: status=%s", r_cont.status_code)
+
         if r_cont.status_code not in (200, 204):
-            logging.warning("verify_2fa_code step3 (continue) failed: %s %s", r_cont.status_code, r_cont.text[:200])
-            # Не фатально — иногда Roblox возвращает 400 но challenge уже принят
+            logging.warning(
+                "verify_2fa_code step3 (continue) failed: %s %s",
+                r_cont.status_code, r_cont.text[:200],
+            )
+            # Не фатально — иногда Roblox возвращает 400, но challenge уже принят
+        else:
+            logging.info("verify_2fa_code step3 (continue) OK: %s", r_cont.status_code)
 
         # Шаг 4: повторяем исходный запрос на получение ссылки с подтверждённым токеном
         _URL_VERIFY = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
         _BODY_VERIFY = {"generateLink": True, "ageEstimation": True, "parentVerification": False}
         r_final = s.post(_URL_VERIFY, json=_BODY_VERIFY, timeout=12)
+
+        # CSRF мог обновиться после step3 — повторяем финальный запрос
+        if r_final.status_code == 403:
+            new_csrf_final = r_final.headers.get("x-csrf-token")
+            if new_csrf_final:
+                s.headers["x-csrf-token"] = new_csrf_final
+                r_final = s.post(_URL_VERIFY, json=_BODY_VERIFY, timeout=12)
+                logging.info("verify_2fa_code step4 retry: status=%s", r_final.status_code)
+
         if r_final.status_code == 200:
-            link = extract_link_from_raw(r_final.text)
+            link = _extract_link(r_final)
             if link:
                 return True, link
+            logging.warning("verify_2fa_code step4: 200 но ссылки нет. url=%s body=%s", r_final.url, r_final.text[:200])
 
         logging.warning("verify_2fa_code final request failed: %s %s", r_final.status_code, r_final.text[:200])
         return False, "link_failed"
@@ -1162,12 +1226,18 @@ def _normalize_cookie(raw: str) -> str:
     - Убирает пробелы/переносы строк
     - Убирает кавычки если пользователь скопировал с ними
     """
-    c = raw.strip().strip('"').strip("'")
+    c = raw.strip().strip('"').strip("'").strip()
     # Roblox добавляет предупреждение вида: _|WARNING:-DO-NOT-SHARE...|_<actual_token>
     # Некоторые пользователи копируют весь cookie целиком включая WARNING
+    # group(0) = весь матч (_|WARNING...|_<token>) — Roblox принимает cookie с WARNING-префиксом
     warning_match = re.search(r'(_\|WARNING[^|]*\|_)(.*)', c, re.DOTALL)
     if warning_match:
-        c = warning_match.group(0)  # оставляем весь токен включая WARNING — Roblox его принимает
+        full_token = warning_match.group(0).strip()
+        # Проверяем что после WARNING есть хоть что-то (group(2) — часть после |_)
+        actual_part = warning_match.group(2).strip()
+        if actual_part:
+            c = full_token
+        # Если actual_part пуст — оставляем c как есть (невалидный cookie, поймает /authenticated)
     return c
 
 async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1258,6 +1328,8 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(result, dict) and result.get("challengeId") and result.get("csrf"):
         # Воркер получил challenge — код отправлен на email, ждём от пользователя
         lang = db_get_lang(user_id) or "ru"
+        # Очищаем устаревшие сессии перед добавлением новой
+        _cleanup_pending_2fa()
         pending_2fa[user_id] = {
             "cookie": cookie,
             "csrf": result["csrf"],
@@ -1267,6 +1339,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "attempt_was_deducted": attempt_was_deducted,
             "chat_id": chat_id,
             "username": username,
+            "created_at": _time.time(),
         }
         code_prompt = (
             "📧 *Код отправлен на email*\n\nВведите 6-значный код из письма Roblox:"
@@ -1324,9 +1397,14 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         if query.data == "cancel_2fa":
             ctx = pending_2fa.pop(user_id, None)
+            attempt_returned = False
             if ctx and ctx.get("attempt_was_deducted"):
                 db_upsert_user(user_id, username, attempts_delta=1, spent_delta=-PRICE_2FA)
-            cancel_msg = "❌ Верификация отменена. Попытка возвращена." if lang == "ru" else "❌ Verification cancelled. Attempt returned."
+                attempt_returned = True
+            if attempt_returned:
+                cancel_msg = "❌ Верификация отменена. Попытка возвращена." if lang == "ru" else "❌ Verification cancelled. Attempt returned."
+            else:
+                cancel_msg = "❌ Верификация отменена." if lang == "ru" else "❌ Verification cancelled."
             await query.edit_message_text(cancel_msg, reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")
             ]]))
@@ -1387,18 +1465,30 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
         return WAITING_MENU
 
-    # Неверный код или ошибка
-    if link_or_error == "rate_limited":
-        err_text = "⏳ Слишком много попыток. Подождите и попробуйте снова." if lang == "ru" else "⏳ Too many attempts. Wait and try again."
-    elif link_or_error == "invalid_code":
-        err_text = "❌ Неверный код. Попробуйте ещё раз:" if lang == "ru" else "❌ Invalid code. Try again:"
-    else:
-        err_text = "❌ Ошибка верификации. Попробуйте ещё раз:" if lang == "ru" else "❌ Verification error. Try again:"
+    # Неверный код — пользователь может попробовать ещё раз (попытка не возвращается)
+    if link_or_error in ("invalid_code", "rate_limited"):
+        if link_or_error == "rate_limited":
+            err_text = "⏳ Слишком много попыток. Подождите и попробуйте снова." if lang == "ru" else "⏳ Too many attempts. Wait and try again."
+        else:
+            err_text = "❌ Неверный код. Попробуйте ещё раз:" if lang == "ru" else "❌ Invalid code. Try again:"
+        await thinking_msg.edit_text(err_text, reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(t(user_id, "btn_cancel"), callback_data="cancel_2fa")
+        ]]))
+        return WAITING_2FA_CODE
 
+    # Серверная ошибка (link_failed / exception) — возвращаем попытку и завершаем
+    ctx_final = pending_2fa.pop(user_id, None)
+    if ctx_final and ctx_final.get("attempt_was_deducted"):
+        try:
+            db_upsert_user(user_id, username, attempts_delta=1, spent_delta=-PRICE_2FA)
+        except Exception as e:
+            logging.error("receive_2fa_code: не удалось вернуть попытку: %s", e)
+
+    err_text = "❌ Ошибка верификации, попытка возвращена." if lang == "ru" else "❌ Verification error, attempt returned."
     await thinking_msg.edit_text(err_text, reply_markup=InlineKeyboardMarkup([[
-        InlineKeyboardButton(t(user_id, "btn_cancel"), callback_data="cancel_2fa")
+        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")
     ]]))
-    return WAITING_2FA_CODE
+    return WAITING_MENU
 
 # ─────────────────────────── MAIN ───────────────────────────
 
