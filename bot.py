@@ -206,6 +206,7 @@ WAITING_ADMIN_CREATE_PROMO          = 10
 WAITING_ADMIN_ADD_SUB               = 11
 WAITING_ADMIN_REMOVE_BALANCE        = 12
 WAITING_ADMIN_REMOVE_BALANCE_AMOUNT = 13
+WAITING_ADMIN_BROADCAST             = 14
 WAITING_2FA_CODE                    = 15
 
 PRICE_2FA     = 1.00
@@ -1325,6 +1326,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("➖ Отнять попытки",        callback_data="admin_rem_bal")],
                 [InlineKeyboardButton("🎟️ Выдать подписку",      callback_data="admin_add_sub")],
                 [InlineKeyboardButton("➕ Создать промокод",      callback_data="admin_create_promo")],
+                [InlineKeyboardButton("📢 Рассылка",              callback_data="admin_broadcast")],
                 [InlineKeyboardButton("🏠 На главную",            callback_data="main_menu")],
             ]),
         )
@@ -1413,6 +1415,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]),
         )
         return WAITING_ADMIN_CREATE_PROMO
+
+    if data == "admin_broadcast":
+        if user_id not in ADMIN_IDS:
+            return WAITING_MENU
+        context.user_data["waiting"] = "admin_broadcast_text"
+        await query.edit_message_text(
+            "📢 *Рассылка*\n\nОтправьте сообщение — оно будет разослано всем пользователям бота.\n\nПоддерживается текст, фото, видео.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Отмена", callback_data="admin")
+            ]]),
+        )
+        return WAITING_ADMIN_BROADCAST
 
     return WAITING_MENU
 
@@ -1559,6 +1574,59 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
             else:
                 await update.message.reply_text("Неверный формат! КОД ПОПЫТКИ ЛИМИТ")
+            return WAITING_ADMIN
+
+        elif waiting == "admin_broadcast_text":
+            context.user_data["waiting"] = None
+            if user_id not in ADMIN_IDS:
+                return WAITING_MENU
+
+            all_users = await loop.run_in_executor(executor, db_get_all_users)
+            all_ids   = [row[0] for row in all_users]
+
+            sent_ok  = 0
+            sent_err = 0
+
+            status_msg = await update.message.reply_text(
+                f"📢 Начинаю рассылку для {len(all_ids)} пользователей...",
+            )
+
+            for target_id in all_ids:
+                try:
+                    if update.message.photo:
+                        await context.bot.send_photo(
+                            chat_id=target_id,
+                            photo=update.message.photo[-1].file_id,
+                            caption=update.message.caption or "",
+                            parse_mode="Markdown",
+                        )
+                    elif update.message.video:
+                        await context.bot.send_video(
+                            chat_id=target_id,
+                            video=update.message.video.file_id,
+                            caption=update.message.caption or "",
+                            parse_mode="Markdown",
+                        )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=target_id,
+                            text=update.message.text or "",
+                            parse_mode="Markdown",
+                        )
+                    sent_ok += 1
+                except Exception:
+                    sent_err += 1
+                await asyncio.sleep(0.05)  # ~20 сообщений/сек — в рамках лимитов Telegram
+
+            await status_msg.edit_text(
+                f"✅ Рассылка завершена\n\n"
+                f"Отправлено: *{sent_ok}*\n"
+                f"Ошибок: *{sent_err}*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("В админку", callback_data="admin")
+                ]]),
+            )
             return WAITING_ADMIN
 
     return await receive_cookie(update, context)
@@ -1944,6 +2012,13 @@ def main():
             WAITING_ADMIN_CREATE_PROMO: [
                 CallbackQueryHandler(handle_callback),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
+            WAITING_ADMIN_BROADCAST: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(
+                    (filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND,
+                    receive_text,
+                ),
             ],
             WAITING_2FA_CODE: [
                 CallbackQueryHandler(receive_2fa_code),
