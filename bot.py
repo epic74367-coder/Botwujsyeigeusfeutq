@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 def escape_md(text: str) -> str:
     """Экранирует спецсимволы Markdown v1."""
-    return re.sub(r'([_*\[\]`\\])', r'\\\\\1', str(text))
+    return re.sub(r'([_*\[\]`\\])', r'\\\1', str(text))
 
 
 BOT_TOKEN        = os.environ.get("BOT_TOKEN")
@@ -702,7 +702,11 @@ def get_url_via_api(cookie: str, method: str) -> str | None:
             "Referer":      "https://www.roblox.com/my/account#!/info",
         })
         url  = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
-        body = {"generateLink": True, "ageEstimation": True, "parentVerification": False}
+        body = (
+            {"generateLink": True, "ageEstimation": False, "parentVerification": False}
+            if method == "id"
+            else {"generateLink": True, "ageEstimation": True, "parentVerification": False}
+        )
         r1   = s.post(url, json=body, timeout=12)
         csrf = r1.headers.get("x-csrf-token")
         if r1.status_code == 200:
@@ -732,21 +736,33 @@ def _is_persona_link(url: str) -> bool:
         return (
             p.scheme == "https"
             and (p.netloc == "withpersona.com" or p.netloc.endswith(".withpersona.com"))
-            and "inquiry-id" in p.query
+            and ("inquiry-id" in p.query or "reference-id" in p.query)
         )
     except Exception:
         return False
 
 
 def extract_link_from_raw(body: str) -> str | None:
+    """
+    Извлекает ссылку Persona из тела ответа.
+    Приоритет: полный URL → inquiry-id + session-token по отдельности.
+    """
     if not body:
         return None
+    # Полный URL — берём всё до пробела/кавычки/обратного слеша
     m = re.search(
-        r'https://[^\s"\'\\]+withpersona\.com[^\s"\'\\]*inquiry-id=[^\s"\'\\&]+(?:&[^\s"\'\\]*)?',
+        r'https://[^\s"\'\\]+withpersona\.com[^\s"\'\\]*inquiry-id=[^\s"\'\\]+',
         body,
     )
     if m:
-        return m.group(0).rstrip("\\")
+        link = m.group(0).rstrip("\\),;")
+        # Убедимся что session-token не был обрезан — если есть отдельно, дописываем
+        if "session-token" not in link:
+            tok_m = re.search(r'session-token=([A-Za-z0-9_\-\.]+)', body)
+            if tok_m:
+                link += f"&session-token={tok_m.group(1)}"
+        return link
+    # Только inquiry-id — собираем ссылку вручную
     m = re.search(r'inquiry-id=(inq_[A-Za-z0-9]+)', body)
     if m:
         inq_id = m.group(1)
@@ -755,6 +771,10 @@ def extract_link_from_raw(body: str) -> str | None:
         if tok_m:
             link += f"&session-token={tok_m.group(1)}"
         return link
+    # reference-id тоже бывает у Persona
+    m = re.search(r'reference-id=([A-Za-z0-9_\-]+)', body)
+    if m:
+        return f"https://inquiry.withpersona.com/verify?reference-id={m.group(1)}"
     return None
 
 
@@ -767,7 +787,9 @@ def _extract_link(r) -> str | None:
 
 # Pending 2FA сессии: user_id → {cookie, csrf, challenge_id, ...}
 pending_2fa: dict[int, dict] = {}
-PENDING_2FA_TTL = int(os.environ.get("PENDING_2FA_TTL", 600))  # 10 минут
+PENDING_2FA_TTL   = int(os.environ.get("PENDING_2FA_TTL", 600))  # 10 минут
+# Защита от race condition: один пользователь — одна запись за раз
+_pending_2fa_lock = __import__("asyncio").Lock()
 
 
 def _cleanup_pending_2fa() -> int:
@@ -793,124 +815,192 @@ def verify_2fa_code(
     csrf: str,
     challenge_id: str,
     code: str,
+    method: str = "camera",
+    inner_challenge_id: str | None = None,
 ) -> tuple[bool, str | None]:
     """
     Верифицирует 6-значный код 2FA через Roblox API.
     Возвращает (True, link) при успехе или (False, error_code) при ошибке.
 
-    FIX: все CSRF-обновления теперь применяются к единственной сессии 's',
-    что устраняет ошибки 'InvalidCsrfToken' при цепочке вызовов.
+    inner_challenge_id — ID для twostepverification/email/verify (из challenge metadata).
+    challenge_id       — outer ID для challenge/v1/continue.
+
+    Flow:
+      1. POST twostepverification/.../email/verify  → verificationToken
+      2. POST challenge/v1/continue                  → разблокирует сессию
+      3. POST age-verification/start-verification    → ссылка Persona
+         При 403 (новый challenge) — повторяем шаг 2 + шаг 3 (до 3 раз).
     """
+    # Если inner не передан — используем outer как fallback
+    inner_challenge_id = inner_challenge_id or challenge_id
     try:
         s = requests.Session()
         s.cookies[".ROBLOSECURITY"] = cookie
         s.headers.update({
+            "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Content-Type": "application/json;charset=utf-8",
+            "Accept":       "application/json, text/plain, */*",
             "x-csrf-token": csrf,
             "Origin":       "https://www.roblox.com",
-            "Referer":      "https://www.roblox.com/",
+            "Referer":      "https://www.roblox.com/my/account#!/security",
         })
 
-        def _refresh_csrf_if_needed(resp) -> bool:
-            """Обновляет CSRF в сессии если сервер вернул 403 с новым токеном."""
-            if resp.status_code == 403:
-                new_c = resp.headers.get("x-csrf-token")
-                if new_c:
-                    s.headers["x-csrf-token"] = new_c
-                    return True
-            return False
+        def _update_csrf(resp) -> None:
+            """Всегда обновляем CSRF из ответа, если он есть."""
+            new_c = resp.headers.get("x-csrf-token")
+            if new_c:
+                s.headers["x-csrf-token"] = new_c
 
-        # ── Шаг 1: проверяем код через twostepverification API ──
+        # ── Шаг 1: верифицируем email-код ──
+        # inner_challenge_id — реальный ID от twostepverification, может отличаться от outer
         verify_url = (
             f"https://twostepverification.roblox.com/v1/users/{user_roblox_id}"
             f"/challenges/email/verify"
         )
         payload_verify = {
-            "challengeId": challenge_id,
+            "challengeId": inner_challenge_id,
             "actionType":  "Generic",
             "code":        code.strip(),
         }
         r_verify = s.post(verify_url, json=payload_verify, timeout=12)
+        _update_csrf(r_verify)
 
-        # CSRF обновился — повторяем
-        if _refresh_csrf_if_needed(r_verify):
+        # Если 403 из-за CSRF — обновляем и повторяем один раз
+        if r_verify.status_code == 403:
             r_verify = s.post(verify_url, json=payload_verify, timeout=12)
+            _update_csrf(r_verify)
+
+        if r_verify.status_code == 429:
+            return False, "rate_limited"
 
         if r_verify.status_code not in (200, 204):
-            logging.warning(
-                "verify_2fa step1 failed: %s %s",
-                r_verify.status_code, r_verify.text[:200],
-            )
-            if r_verify.status_code == 429:
-                return False, "rate_limited"
+            body_text = r_verify.text[:300]
+            logging.warning("verify_2fa step1 failed: %s %s", r_verify.status_code, body_text)
+            if r_verify.status_code == 400:
+                # Сначала пробуем распарсить JSON
+                err_code = ""
+                try:
+                    err = r_verify.json()
+                    err_code = (err.get("code") or err.get("error") or "").upper()
+                except Exception:
+                    pass
+                # Если JSON пустой — смотрим на текст тела
+                if not err_code:
+                    err_code = body_text.upper()
+                if (
+                    "EXPIRED" in err_code
+                    or "INVALID_CHALLENGE" in err_code
+                    or "CHALLENGE_EXPIRED" in err_code
+                    or "SESSION" in err_code
+                ):
+                    return False, "session_expired"
             return False, "invalid_code"
 
-        # ── Шаг 2: извлекаем verification token ──
+        # ── Шаг 2: извлекаем verificationToken ──
         try:
             verification_token = r_verify.json().get("verificationToken", "")
         except Exception:
             verification_token = ""
 
         if not verification_token:
-            logging.warning(
-                "verify_2fa step2: нет verificationToken: %s", r_verify.text[:100]
-            )
+            logging.warning("verify_2fa step2: нет verificationToken: %s", r_verify.text[:100])
             return False, "invalid_code"
 
+        logging.info("verify_2fa step2: got verificationToken")
+
         # ── Шаг 3: подтверждаем challenge ──
-        challenge_metadata_str = (
-            f'{{"rememberDevice":false,"verificationToken":"{verification_token}",'
-            f'"challengeId":"{challenge_id}","actionType":"Generic"}}'
-        )
-        payload_cont = {
-            "challengeId":       challenge_id,
-            "challengeType":     "twostepverification",
-            "challengeMetadata": challenge_metadata_str,
-        }
-        r_cont = s.post(
-            "https://apis.roblox.com/challenge/v1/continue",
-            json=payload_cont,
-            timeout=12,
-        )
-        if _refresh_csrf_if_needed(r_cont):
-            r_cont = s.post(
-                "https://apis.roblox.com/challenge/v1/continue",
-                json=payload_cont,
-                timeout=12,
+        def _do_continue() -> requests.Response:
+            meta_str = (
+                f'{{"rememberDevice":false,"verificationToken":"{verification_token}",'
+                f'"challengeId":"{challenge_id}","actionType":"Generic"}}'
             )
-            logging.info("verify_2fa step3 retry: status=%s", r_cont.status_code)
+            payload = {
+                "challengeId":       challenge_id,
+                "challengeType":     "twostepverification",
+                "challengeMetadata": meta_str,
+            }
+            r = s.post("https://apis.roblox.com/challenge/v1/continue", json=payload, timeout=12)
+            _update_csrf(r)
+            # CSRF обновился — повторяем
+            if r.status_code == 403:
+                r = s.post("https://apis.roblox.com/challenge/v1/continue", json=payload, timeout=12)
+                _update_csrf(r)
+            return r
 
-        if r_cont.status_code not in (200, 204):
-            logging.warning(
-                "verify_2fa step3 failed: %s %s",
-                r_cont.status_code, r_cont.text[:200],
-            )
-            # Не фатально — Roblox иногда возвращает 400, но challenge уже принят
-        else:
-            logging.info("verify_2fa step3 OK: %s", r_cont.status_code)
+        r_cont = _do_continue()
+        logging.info("verify_2fa step3 (continue): status=%s body=%s", r_cont.status_code, r_cont.text[:150])
 
-        # ── Шаг 4: повторяем запрос на ссылку с подтверждённым токеном ──
-        _URL_V = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
-        _BODY_V = {"generateLink": True, "ageEstimation": True, "parentVerification": False}
-        r_final = s.post(_URL_V, json=_BODY_V, timeout=12)
+        # ── Шаг 4: запрашиваем ссылку; при 403+challenge повторяем continue ──
+        _URL_V  = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
+        _BODY_V = (
+            {"generateLink": True, "ageEstimation": False, "parentVerification": False}
+            if method == "id"
+            else {"generateLink": True, "ageEstimation": True, "parentVerification": False}
+        )
 
-        if _refresh_csrf_if_needed(r_final):
+        for attempt in range(4):  # до 4 попыток: иногда Roblox даёт новый challenge
             r_final = s.post(_URL_V, json=_BODY_V, timeout=12)
-            logging.info("verify_2fa step4 retry: status=%s", r_final.status_code)
-
-        if r_final.status_code == 200:
-            link = _extract_link(r_final)
-            if link:
-                return True, link
-            logging.warning(
-                "verify_2fa step4: 200 но ссылки нет. url=%s body=%s",
-                r_final.url, r_final.text[:200],
+            _update_csrf(r_final)
+            logging.info(
+                "verify_2fa step4 attempt=%d: status=%s url=%s body=%s",
+                attempt, r_final.status_code, r_final.url, r_final.text[:200],
             )
 
-        logging.warning(
-            "verify_2fa final failed: %s %s",
-            r_final.status_code, r_final.text[:200],
-        )
+            if r_final.status_code == 200:
+                link = _extract_link(r_final)
+                if link:
+                    logging.info("verify_2fa SUCCESS: link=%s", link[:80])
+                    return True, link
+                # 200 но ссылки нет — может быть редирект уже в r_final.url
+                logging.warning("verify_2fa step4: 200 но ссылки нет. url=%s body=%s",
+                                r_final.url, r_final.text[:300])
+                # Пробуем ещё раз — иногда нужен один лишний запрос
+                _time.sleep(0.5)
+                continue
+
+            if r_final.status_code == 403:
+                ctype = r_final.headers.get("rblx-challenge-type", "")
+                cid   = r_final.headers.get("rblx-challenge-id", "")
+                logging.info(
+                    "verify_2fa step4 403: challengeType=%s challengeId=%s — повторяем continue",
+                    ctype, cid,
+                )
+                if ctype == "twostepverification" and cid:
+                    # Сервер выдал новый challenge — снова подтверждаем с тем же токеном
+                    # но уже с новым challengeId
+                    meta_str = (
+                        f'{{"rememberDevice":false,"verificationToken":"{verification_token}",'
+                        f'"challengeId":"{cid}","actionType":"Generic"}}'
+                    )
+                    payload_retry = {
+                        "challengeId":       cid,
+                        "challengeType":     "twostepverification",
+                        "challengeMetadata": meta_str,
+                    }
+                    r_retry = s.post(
+                        "https://apis.roblox.com/challenge/v1/continue",
+                        json=payload_retry, timeout=12,
+                    )
+                    _update_csrf(r_retry)
+                    if r_retry.status_code == 403:
+                        r_retry = s.post(
+                            "https://apis.roblox.com/challenge/v1/continue",
+                            json=payload_retry, timeout=12,
+                        )
+                        _update_csrf(r_retry)
+                    logging.info("verify_2fa step4 re-continue: status=%s", r_retry.status_code)
+                else:
+                    # plain 403 без challenge — просто повторяем
+                    logging.info("verify_2fa step4 plain 403 — retry")
+                _time.sleep(0.3)
+                continue
+
+            # Любой другой статус — ошибка
+            logging.warning("verify_2fa step4 unexpected: status=%s body=%s",
+                            r_final.status_code, r_final.text[:200])
+            break
+
+        logging.error("verify_2fa: не удалось получить ссылку после всех попыток")
         return False, "link_failed"
 
     except requests.exceptions.Timeout:
@@ -1726,12 +1816,24 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(result, dict) and result.get("challengeId") and result.get("csrf"):
         lang = db_get_lang(user_id) or "ru"
         _cleanup_pending_2fa()
+        async with _pending_2fa_lock:
+          # Если запись уже есть (двойной вызов) — возвращаем попытку и выходим
+          if user_id in pending_2fa and attempt_was_deducted:
+              try:
+                  await loop.run_in_executor(executor, db_upsert_user, user_id, username, 1, -PRICE_2FA)
+              except Exception as e:
+                  logging.error("pending_2fa double-write: не удалось вернуть попытку: %s", e)
+              await msg.edit_text(t(user_id, "failed_returned"))
+              return WAITING_MENU
         pending_2fa[user_id] = {
             "cookie":               cookie,
             "csrf":                 result["csrf"],
             "challenge_id":         result["challengeId"],
+            # innerChallengeId — реальный ID для twostepverification API;
+            # если воркер не вернул — используем outer как fallback
+            "inner_challenge_id":   result.get("innerChallengeId") or result["challengeId"],
             "user_roblox_id":       user.get("id"),
-            "method":               method,
+            "method":               method,         # "camera" or "id"
             "attempt_was_deducted": attempt_was_deducted,
             "chat_id":              chat_id,
             "username":             username,
@@ -1887,6 +1989,8 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ctx["csrf"],
         ctx["challenge_id"],
         code_text,
+        ctx.get("method", "camera"),
+        ctx.get("inner_challenge_id"),   # inner ID для email/verify
     )
 
     # ── Успех ──
@@ -1936,7 +2040,30 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_2FA_CODE
 
-    # ── Серверная ошибка — возвращаем попытку ──
+    # ── Сессия истекла (код устарел) — возвращаем попытку и просим начать заново ──
+    if link_or_error == "session_expired":
+        ctx_exp = pending_2fa.pop(user_id, None)
+        if ctx_exp and ctx_exp.get("attempt_was_deducted"):
+            try:
+                await loop.run_in_executor(
+                    executor, db_upsert_user, user_id, username, 1, -PRICE_2FA
+                )
+            except Exception as e:
+                logging.error("session_expired: не удалось вернуть попытку: %s", e)
+        exp_text = (
+            "⚠️ Код истёк или сессия устарела. Попытка возвращена — начните заново /start"
+            if lang == "ru" else
+            "⚠️ Code expired or session invalid. Attempt returned — restart /start"
+        )
+        await thinking_msg.edit_text(
+            exp_text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")
+            ]]),
+        )
+        return WAITING_MENU
+
+    # ── Серверная ошибка (link_failed / exception / неизвестный код) — возвращаем попытку ──
     ctx_final = pending_2fa.pop(user_id, None)
     if ctx_final and ctx_final.get("attempt_was_deducted"):
         try:
@@ -1946,11 +2073,25 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.error("receive_2fa_code: не удалось вернуть попытку: %s", e)
 
-    err_text = (
-        "❌ Ошибка верификации, попытка возвращена."
-        if lang == "ru" else
-        "❌ Verification error, attempt returned."
-    )
+    if link_or_error == "link_failed":
+        err_text = (
+            "❌ Код принят, но ссылку получить не удалось. Попытка возвращена — попробуйте ещё раз."
+            if lang == "ru" else
+            "❌ Code accepted but failed to get the link. Attempt returned — please try again."
+        )
+    elif link_or_error == "exception":
+        err_text = (
+            "❌ Сетевая ошибка при верификации. Попытка возвращена."
+            if lang == "ru" else
+            "❌ Network error during verification. Attempt returned."
+        )
+    else:
+        err_text = (
+            "❌ Ошибка верификации, попытка возвращена."
+            if lang == "ru" else
+            "❌ Verification error, attempt returned."
+        )
+    logging.error("receive_2fa_code: terminal error code=%s user=%s", link_or_error, user_id)
     await thinking_msg.edit_text(
         err_text,
         reply_markup=InlineKeyboardMarkup([[
